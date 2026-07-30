@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opposable"
+version = "0.1.0"
+description = "An open-source Manus-style general agent: one loop, one sandbox, disciplined context."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Ezra Zhang" }]
+keywords = ["agent", "llm", "autonomous", "sandbox", "manus"]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+opposable = "opposable.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["opposable*"]
