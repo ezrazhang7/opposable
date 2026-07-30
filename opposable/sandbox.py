@@ -17,9 +17,26 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import subprocess
 import uuid
+from functools import lru_cache
 from pathlib import Path
+
+
+@lru_cache(maxsize=1)
+def _bash_path() -> str:
+    """Locate bash, including Git Bash on Windows hosts where it isn't on PATH."""
+    found = shutil.which("bash")
+    if found:
+        return found
+    for candidate in (
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ):
+        if os.path.exists(candidate):
+            return candidate
+    return "bash"
 
 
 class Sandbox:
@@ -55,10 +72,11 @@ class LocalSandbox(Sandbox):
     def exec(self, command: str, timeout: int = 120) -> tuple[int, str, str]:
         try:
             proc = subprocess.run(
-                ["bash", "-lc", command],
+                [_bash_path(), "-lc", command],
                 cwd=self.root,
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 env={**os.environ, "OPPOSABLE_SANDBOX": "local"},
             )
@@ -69,11 +87,11 @@ class LocalSandbox(Sandbox):
     def write_file(self, path: str, content: str) -> str:
         p = self._resolve(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content)
+        p.write_text(content, encoding="utf-8")
         return str(p)
 
     def read_file(self, path: str) -> str:
-        return self._resolve(path).read_text()
+        return self._resolve(path).read_text(encoding="utf-8")
 
 
 class DockerSandbox(Sandbox):
@@ -101,7 +119,8 @@ class DockerSandbox(Sandbox):
         proc = subprocess.run(
             ["docker", "exec", self.name, "bash", "-lc", command],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
         return proc.returncode, proc.stdout, proc.stderr

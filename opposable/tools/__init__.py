@@ -12,12 +12,73 @@ The full tool list is defined once, up front, and never changes.
 from __future__ import annotations
 
 import json
+import re
 import urllib.request
+from html.parser import HTMLParser
 from typing import Any
 
 from ..sandbox import Sandbox
 
 MAX_OBSERVATION_CHARS = 24_000  # hard cap per observation before truncation
+
+_BLOCK_TAGS = {
+    "p", "div", "br", "li", "ul", "ol", "tr", "table", "section", "article",
+    "header", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre",
+}
+
+
+class _TextExtractor(HTMLParser):
+    """Strip an HTML page down to its visible text plus link targets."""
+
+    _SKIP = {"script", "style", "noscript", "template", "svg", "head", "iframe"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip_depth = 0
+        self._parts: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP:
+            self._skip_depth += 1
+        elif tag in _BLOCK_TAGS:
+            self._parts.append("\n")
+        elif tag == "a":
+            href = dict(attrs).get("href", "")
+            if href.startswith("http"):
+                self._parts.append(f" [{href}] ")
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP and self._skip_depth:
+            self._skip_depth -= 1
+        elif tag in _BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_data(self, data):
+        if not self._skip_depth:
+            self._parts.append(data)
+
+    def text(self) -> str:
+        raw = "".join(self._parts)
+        raw = re.sub(r"[ \t\r\f\v]+", " ", raw)
+        raw = re.sub(r" ?\n ?", "\n", raw)
+        return re.sub(r"\n{3,}", "\n\n", raw).strip()
+
+
+def html_to_text(body: str) -> str:
+    parser = _TextExtractor()
+    try:
+        parser.feed(body)
+        parser.close()
+    except Exception:  # noqa: BLE001 — malformed HTML falls back to raw
+        return body
+    return parser.text()
+
+
+def _looks_like_html(content_type: str, body: str) -> bool:
+    if "html" in content_type.lower():
+        return True
+    head = body.lstrip()[:200].lower()
+    return head.startswith("<!doctype") or head.startswith("<html")
 
 
 def _truncate(text: str, sandbox: Sandbox, label: str) -> str:
@@ -164,7 +225,19 @@ class ToolRuntime:
                     args["url"], headers={"User-Agent": "opposable/0.1"}
                 )
                 with urllib.request.urlopen(req, timeout=30) as resp:
+                    content_type = resp.headers.get("Content-Type", "")
                     body = resp.read(2_000_000).decode("utf-8", errors="replace")
+                if _looks_like_html(content_type, body):
+                    # Markup is ~5-10x the tokens of the visible text and gets
+                    # re-sent every iteration. Keep the raw HTML restorable on
+                    # disk; put only the extracted text in context.
+                    raw_path = self.sandbox.write_file(
+                        f".opposable/spill/{label}-raw.html", body
+                    )
+                    body = (
+                        f"[HTML stripped to text; raw page saved to {raw_path}]\n\n"
+                        + html_to_text(body)
+                    )
                 return _truncate(body, self.sandbox, label), False
 
             if name == "task_complete":

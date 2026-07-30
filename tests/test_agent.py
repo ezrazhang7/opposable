@@ -16,6 +16,10 @@ from opposable.loop import Agent
 from opposable.providers import ModelTurn, ScriptedProvider, ToolCall
 from opposable.sandbox import LocalSandbox
 
+# Pick a working python: on Windows, Git Bash's `python3` can resolve to the
+# Microsoft Store alias shim, which exits without running anything.
+PICK_PY = "py=python3; $py -c pass 2>/dev/null || py=python; "
+
 
 def turn(*calls: ToolCall, text: str = "") -> ModelTurn:
     raw = ([{"type": "text", "text": text}] if text else []) + [
@@ -31,7 +35,7 @@ def test_full_task_with_plan_shell_and_completion(tmp_path):
         [
             turn(ToolCall("t1", "plan_update", {"plan": "- [ ] write script\n- [ ] run it\n- [ ] done"})),
             turn(ToolCall("t2", "file_write", {"path": "hello.py", "content": "print(6*7)"})),
-            turn(ToolCall("t3", "shell_exec", {"command": "python3 hello.py"})),
+            turn(ToolCall("t3", "shell_exec", {"command": PICK_PY + "$py hello.py"})),
             turn(
                 ToolCall("t4", "plan_update", {"plan": "- [x] write script\n- [x] run it\n- [x] done"}),
                 ToolCall("t5", "task_complete", {"summary": "printed 42", "deliverables": ["hello.py"]}),
@@ -61,7 +65,7 @@ def test_error_stays_in_context(tmp_path):
     sandbox = LocalSandbox(root=tmp_path / "ws")
     provider = ScriptedProvider(
         [
-            turn(ToolCall("t1", "shell_exec", {"command": "python3 nope.py"})),
+            turn(ToolCall("t1", "shell_exec", {"command": PICK_PY + "$py nope.py"})),
             turn(ToolCall("t2", "task_complete", {"summary": "diagnosed the failure"})),
         ]
     )

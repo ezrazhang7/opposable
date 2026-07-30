@@ -113,16 +113,27 @@ class Ledger:
     def render(self, recitation: str | None = None) -> list[dict]:
         """Render provider messages. Optionally append plan recitation."""
         messages = [e.render() for e in self.events]
-        if recitation and messages:
-            # Recite into the *last* user-role message so we never break the
-            # assistant/tool alternation the API requires, and the plan sits
-            # at the very end of the prompt where attention is strongest.
+        if messages:
+            # Prompt caching breakpoint #2: the last block of the stable
+            # history. Everything up to here is byte-identical to what the
+            # previous request sent (append-only ledger), so the provider
+            # serves it as a cache read and only the new turn is billed at
+            # full price. The recitation goes AFTER this marker — it changes
+            # every turn and must stay outside the cached prefix. Blocks are
+            # copied so cache markers never leak into the immutable events.
             last = messages[-1]
-            if last["role"] == "user":
-                blocks = last["content"]
-                if isinstance(blocks, str):
-                    blocks = [{"type": "text", "text": blocks}]
-                    last["content"] = blocks
+            blocks = last["content"]
+            if isinstance(blocks, str):
+                blocks = [{"type": "text", "text": blocks}]
+            else:
+                blocks = list(blocks)
+            blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
+            last["content"] = blocks
+            if recitation and last["role"] == "user":
+                # Recite into the *last* user-role message so we never break
+                # the assistant/tool alternation the API requires, and the
+                # plan sits at the very end of the prompt where attention is
+                # strongest.
                 blocks.append(
                     {
                         "type": "text",

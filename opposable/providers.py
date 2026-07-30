@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -34,6 +34,7 @@ class ModelTurn:
     tool_calls: list[ToolCall]
     raw_content: list[dict]
     stop_reason: str
+    usage: dict = field(default_factory=dict)
 
 
 class Provider:
@@ -61,7 +62,13 @@ class AnthropicProvider(Provider):
         payload: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens,
-            "system": system,
+            # Prompt caching breakpoint #1: tools + system prompt. Both are
+            # byte-stable across the whole run, so every request after the
+            # first reads them at ~0.1x input price. (Breakpoint #2 rides on
+            # the last message block — see Ledger.render.)
+            "system": [
+                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+            ],
             "messages": messages,
             "tools": tools,
         }
@@ -89,6 +96,7 @@ class AnthropicProvider(Provider):
             tool_calls=calls,
             raw_content=data.get("content", []),
             stop_reason=data.get("stop_reason", ""),
+            usage=data.get("usage", {}) or {},
         )
 
 
@@ -158,6 +166,7 @@ class OpenAICompatProvider(Provider):
             tool_calls=calls,
             raw_content=raw,
             stop_reason=data["choices"][0].get("finish_reason", ""),
+            usage=data.get("usage", {}) or {},
         )
 
 

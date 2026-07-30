@@ -81,6 +81,7 @@ class Agent:
         self.state_dir = Path(state_dir) if state_dir else None
         self.on_event = on_event or (lambda kind, payload: None)
         self._spill_count = 0
+        self.usage: dict[str, int] = {}
 
     # ------------------------------------------------------------------ state
 
@@ -111,7 +112,9 @@ class Agent:
                 for e in self.ledger.events
             ],
         }
-        (self.state_dir / "state.json").write_text(json.dumps(state, sort_keys=True))
+        (self.state_dir / "state.json").write_text(
+            json.dumps(state, sort_keys=True), encoding="utf-8"
+        )
 
     def load_state(self) -> bool:
         if not self.state_dir:
@@ -119,7 +122,7 @@ class Agent:
         path = self.state_dir / "state.json"
         if not path.exists():
             return False
-        state = json.loads(path.read_text())
+        state = json.loads(path.read_text(encoding="utf-8"))
         self.runtime.plan = state.get("plan")
         for e in state["events"]:
             self.ledger.append(Event(**e))
@@ -156,6 +159,9 @@ class Agent:
                 tools=TOOL_SCHEMAS,    # never mutated mid-run
                 tool_choice=tool_choice,
             )
+            for key, value in turn.usage.items():
+                if isinstance(value, int):
+                    self.usage[key] = self.usage.get(key, 0) + value
             self.ledger.append(Event(role="assistant", content=turn.raw_content))
             if turn.text:
                 self.on_event("assistant", {"text": turn.text})

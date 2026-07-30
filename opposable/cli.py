@@ -11,6 +11,7 @@ import argparse
 import os
 import sys
 
+from .env import load_env_files
 from .loop import Agent
 from .providers import AnthropicProvider, OpenAICompatProvider
 from .sandbox import DockerSandbox, LocalSandbox
@@ -48,6 +49,14 @@ def build_provider(args: argparse.Namespace):
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows consoles/redirects default to a legacy codepage; model output
+    # is unicode. Never let a stray emoji kill the run.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+    load_env_files()  # before the parser: OPPOSABLE_MODEL feeds argparse defaults
+
     parser = argparse.ArgumentParser(prog="opposable", description="general agent, open thumb")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -99,7 +108,21 @@ def main(argv: list[str] | None = None) -> int:
     print(result.summary)
     for d in result.deliverables:
         print(f"  deliverable: {d}")
+    _print_usage(agent.usage)
     return 0 if result.completed else 1
+
+
+def _print_usage(usage: dict[str, int]) -> None:
+    if not usage:
+        return
+    fresh = usage.get("input_tokens", usage.get("prompt_tokens", 0))
+    cache_read = usage.get("cache_read_input_tokens", 0)
+    cache_write = usage.get("cache_creation_input_tokens", 0)
+    out = usage.get("output_tokens", usage.get("completion_tokens", 0))
+    print(
+        f"{DIM}tokens: {fresh:,} uncached in · {cache_read:,} cache read · "
+        f"{cache_write:,} cache write · {out:,} out{RESET}"
+    )
 
 
 if __name__ == "__main__":

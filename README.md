@@ -8,9 +8,11 @@ Manus (now Meta) proved that a "virtual computer agent" is mostly not a model â€
 
 ```bash
 pip install -e .
-export ANTHROPIC_API_KEY=sk-ant-...
+cp .env.example .env.local   # then put your ANTHROPIC_API_KEY in it
 opposable run "scrape the top 10 HN stories, analyze the themes, write a report to report.md"
 ```
+
+`opposable` loads `.env.local` and `.env` automatically (searched from the current directory upward), so you set your key once instead of exporting it in every terminal. Real environment variables always win, then `.env.local` (personal, gitignored), then `.env`. See [.env.example](.env.example) for all supported variables â€” including `OPPOSABLE_MODEL` and `OPPOSABLE_BASE_URL` for OpenAI-compatible endpoints.
 
 Or against any OpenAI-compatible endpoint (vLLM, Ollama, OpenAI):
 
