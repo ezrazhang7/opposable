@@ -101,7 +101,12 @@ export const api = {
  *  reconnect forever. */
 export function openEvents(
   id: string,
-  handlers: { onEvent: (e: AgentEvent) => void; onEof?: () => void; onError?: () => void },
+  handlers: {
+    onEvent: (e: AgentEvent) => void;
+    onEof?: () => void;
+    onError?: () => void;
+    onAuthExpired?: () => void;
+  },
 ): () => void {
   const source = new EventSource(`/api/tasks/${id}/events`);
   for (const kind of EVENT_KINDS) {
@@ -117,6 +122,14 @@ export function openEvents(
   source.addEventListener("eof", () => {
     source.close();
     handlers.onEof?.();
+  });
+  // The server re-reads the session row on its heartbeat, so a logout or a
+  // suspension ends the stream mid-run. Close *before* handing back to the
+  // caller: EventSource reconnects automatically, and reconnecting into a
+  // login redirect is an infinite loop.
+  source.addEventListener("auth_expired", () => {
+    source.close();
+    handlers.onAuthExpired?.();
   });
   source.onerror = () => {
     if (source.readyState === EventSource.CLOSED) handlers.onError?.();

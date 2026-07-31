@@ -42,10 +42,13 @@ def start_server(tmp_path, turns, slow=False):
     return httpd, httpd.server_address[1]
 
 
-def request(port, method, path, body=None):
+def request(port, method, path, body=None, headers=None):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
     payload = json.dumps(body).encode() if body is not None else None
-    conn.request(method, path, body=payload, headers={"Content-Type": "application/json"})
+    conn.request(
+        method, path, body=payload,
+        headers={"Content-Type": "application/json", **(headers or {})},
+    )
     resp = conn.getresponse()
     data = json.loads(resp.read() or b"{}")
     conn.close()

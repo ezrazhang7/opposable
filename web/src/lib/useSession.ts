@@ -63,6 +63,12 @@ export function useSession(task: TaskMeta | null): Session {
         setEvents((prev) => [...prev, e]);
       },
       onEof: () => setEnded(true),
+      // The stream is already closed by the time this fires; ending the
+      // session here stops the UI from acting as though the run is live.
+      onAuthExpired: () => {
+        setEnded(true);
+        setError("your session ended — sign in again to keep watching");
+      },
       onError: () => setError("event stream disconnected"),
     });
   }, [id, nonce]);

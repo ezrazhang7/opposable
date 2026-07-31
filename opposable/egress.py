@@ -191,8 +191,11 @@ def fetch(
     timeout: float = 30,
     max_bytes: int = 2_000_000,
     user_agent: str = "opposable/0.1",
+    method: str = "GET",
+    body: bytes | None = None,
+    content_type: str | None = None,
 ) -> tuple[str, str, str]:
-    """GET a URL under egress policy. Returns (final_url, content_type, body).
+    """Request a URL under egress policy. Returns (final_url, content_type, body).
 
     Redirects are followed manually because the whole point is to re-run the
     policy on every hop — a permitted host redirecting to ``169.254.169.254``
@@ -205,8 +208,11 @@ def fetch(
         ip = resolve(host, port)[0]
         conn_cls = _PinnedHTTPSConnection if scheme == "https" else _PinnedHTTPConnection
         conn = conn_cls(host, ip, port, timeout)
+        headers = {"User-Agent": user_agent, "Host": host}
+        if content_type:
+            headers["Content-Type"] = content_type
         try:
-            conn.request("GET", target, headers={"User-Agent": user_agent, "Host": host})
+            conn.request(method, target, body=body, headers=headers)
             resp = conn.getresponse()
             if resp.status in (301, 302, 303, 307, 308):
                 location = resp.headers.get("Location")

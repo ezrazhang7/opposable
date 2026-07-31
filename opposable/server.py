@@ -25,17 +25,21 @@ import json
 import mimetypes
 import os
 import queue
+import re
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
-from . import config
+from . import auth, config
+from .auth import Identity
 from .loop import Agent, RunResult
 from .providers import AnthropicProvider, OpenAICompatProvider, Provider
 from .sandbox import DockerSandbox, LocalSandbox
+from .store import Store
 
 # Inside the package, so `pip install opposable` carries the UI with it.
 # Vite writes here (web/vite.config.ts) and pyproject ships it as package data.
@@ -75,6 +79,12 @@ def default_provider_factory(params: dict) -> Provider:
     return AnthropicProvider(model=model)
 
 
+# Task ids are hex and nothing else. Beyond hygiene: the id is interpolated
+# into a directory name, so ".opposable-../../etc" would have walked out of
+# the base directory entirely.
+TASK_ID_RE = re.compile(r"^[0-9a-f]{8,64}$")
+
+
 @dataclass
 class TaskHandle:
     id: str
@@ -82,6 +92,8 @@ class TaskHandle:
     created: float
     workdir: str
     state_dir: Path
+    org_id: str = auth.LOCAL_ORG
+    created_by: str = auth.LOCAL_USER
     status: str = "running"  # running | complete | stopped | error
     agent: Agent | None = None
     thread: threading.Thread | None = None
@@ -98,6 +110,8 @@ class TaskHandle:
             "created": self.created,
             "status": self.status,
             "workdir": self.workdir,
+            "org_id": self.org_id,
+            "created_by": self.created_by,
             "model": self.params.get("model"),
             "sandbox": self.params.get("sandbox", "local"),
         }
@@ -106,11 +120,13 @@ class TaskHandle:
 class TaskManager:
     """Owns every task: registry of live handles + lazy loading from disk."""
 
-    def __init__(self, base_dir: str | None = None, provider_factory=None):
+    def __init__(self, base_dir: str | None = None, provider_factory=None, store: Store | None = None):
         self.base_dir = Path(base_dir or Path.cwd())
         self.provider_factory = provider_factory or default_provider_factory
         self.tasks: dict[str, TaskHandle] = {}
         self.lock = threading.Lock()
+        self.store = store or (Store(self.base_dir / ".opposable-identity.db")
+                               if config.auth_enabled() else None)
 
     # ---------------------------------------------------------------- events
 
@@ -169,8 +185,11 @@ class TaskManager:
             on_event=lambda kind, payload: self._emit(handle, kind, payload),
         )
 
-    def create(self, task: str, params: dict) -> TaskHandle:
-        task_id = uuid.uuid4().hex[:8]
+    def create(self, task: str, params: dict, identity: Identity = auth.LOCAL_IDENTITY) -> TaskHandle:
+        # Full 128 bits. The old uuid4().hex[:8] was 32 bits: enumerable, and
+        # at ~65k tasks a coin flip to collide -- which silently corrupts one
+        # task with another's events rather than failing loudly.
+        task_id = uuid.uuid4().hex
         workdir = self.base_dir / f".opposable-{task_id}"
         state_dir = workdir / ".opposable" / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -180,6 +199,8 @@ class TaskManager:
             created=time.time(),
             workdir=str(workdir),
             state_dir=state_dir,
+            org_id=identity.org_id,
+            created_by=identity.user_id,
             params=params,
         )
         with self.lock:
@@ -244,6 +265,8 @@ class TaskManager:
     # ------------------------------------------------------------- discovery
 
     def _load_from_disk(self, task_id: str) -> TaskHandle | None:
+        if not TASK_ID_RE.match(task_id):
+            return None
         workdir = self.base_dir / f".opposable-{task_id}"
         state_dir = workdir / ".opposable" / "state"
         meta_path = state_dir / "meta.json"
@@ -258,6 +281,8 @@ class TaskManager:
             state_dir=state_dir,
             # A "running" status on disk means the server died mid-task.
             status=meta.get("status") if meta.get("status") != "running" else "stopped",
+            org_id=meta.get("org_id", auth.LOCAL_ORG),
+            created_by=meta.get("created_by", auth.LOCAL_USER),
             params={"model": meta.get("model"), "sandbox": meta.get("sandbox", "local")},
         )
         events_path = state_dir / "events.jsonl"
@@ -267,22 +292,28 @@ class TaskManager:
                     handle.history.append(json.loads(line))
         return handle
 
-    def get(self, task_id: str) -> TaskHandle | None:
+    def get(self, task_id: str, org_id: str | None = None) -> TaskHandle | None:
+        """Scoped fetch. ``org_id`` is part of the lookup, not a check applied
+        afterwards, and a miss is indistinguishable from "no such task" —
+        callers turn both into 404, never 403. A 403 confirms the id exists
+        and turns a blind scan into an oracle (HOSTED_PRD §7)."""
         with self.lock:
-            if task_id in self.tasks:
-                return self.tasks[task_id]
-        handle = self._load_from_disk(task_id)
-        if handle:
-            with self.lock:
-                self.tasks.setdefault(task_id, handle)
-                handle = self.tasks[task_id]
+            handle = self.tasks.get(task_id)
+        if handle is None:
+            handle = self._load_from_disk(task_id)
+            if handle:
+                with self.lock:
+                    self.tasks.setdefault(task_id, handle)
+                    handle = self.tasks[task_id]
+        if handle and org_id is not None and handle.org_id != org_id:
+            return None
         return handle
 
-    def list(self) -> list[dict]:
+    def list(self, org_id: str | None = None) -> list[dict]:
         ids = {p.name.removeprefix(".opposable-") for p in self.base_dir.glob(".opposable-*") if p.is_dir()}
         with self.lock:
             ids.update(self.tasks.keys())
-        handles = [h for h in (self.get(i) for i in sorted(ids)) if h]
+        handles = [h for h in (self.get(i, org_id) for i in sorted(ids)) if h]
         return [h.meta() for h in sorted(handles, key=lambda h: h.created, reverse=True)]
 
 
@@ -319,11 +350,41 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return {}
 
-    def _task_or_404(self, task_id: str) -> TaskHandle | None:
-        handle = self.manager.get(task_id)
+    def _task_or_404(self, task_id: str, identity: Identity) -> TaskHandle | None:
+        handle = self.manager.get(task_id, identity.org_id)
         if not handle:
-            self._error(404, f"no task {task_id}")
+            # Deliberately identical to the not-found case: another tenant's
+            # task must not be distinguishable from one that does not exist.
+            self._error(404, "no such task")
         return handle
+
+    # -------------------------------------------------------------- identity
+
+    def _identity(self) -> Identity | None:
+        if not config.auth_enabled():
+            return auth.LOCAL_IDENTITY
+        secret = auth.session_from_cookies(self.headers.get("Cookie"))
+        return auth.identity_for(self.manager.store, secret)
+
+    def _require_identity(self) -> Identity | None:
+        identity = self._identity()
+        if identity is None:
+            self._error(401, "authentication required")
+        return identity
+
+    def _check_csrf(self) -> bool:
+        if not config.auth_enabled():
+            return True
+        try:
+            auth.check_csrf(
+                self.headers.get("Sec-Fetch-Site"),
+                self.headers.get("Origin"),
+                config.app_origin(),
+            )
+        except auth.AuthError as exc:
+            self._error(403, str(exc))
+            return False
+        return True
 
     # ----------------------------------------------------------------- routes
 
@@ -331,10 +392,15 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         parts = [p for p in path.split("/") if p]
         try:
+            if parts[:2] == ["api", "auth"]:
+                return self._auth_get(parts[2:])
             if parts[:2] == ["api", "tasks"]:
+                identity = self._require_identity()
+                if not identity:
+                    return
                 if len(parts) == 2:
-                    return self._json(200, self.manager.list())
-                handle = self._task_or_404(parts[2])
+                    return self._json(200, self.manager.list(identity.org_id))
+                handle = self._task_or_404(parts[2], identity)
                 if not handle:
                     return
                 if len(parts) == 3:
@@ -353,8 +419,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parts = [p for p in self.path.split("?", 1)[0].split("/") if p]
+        if not self._check_csrf():
+            return
+        if parts[:2] == ["api", "auth"]:
+            return self._auth_post(parts[2:], self._body())
         if parts[:2] != ["api", "tasks"]:
             return self._error(404, "unknown endpoint")
+        identity = self._require_identity()
+        if not identity:
+            return
         body = self._body()
 
         if len(parts) == 2:
@@ -366,6 +439,10 @@ class Handler(BaseHTTPRequestHandler):
                 for k in ("model", "base_url", "sandbox", "image", "max_iterations", "budget_tokens")
                 if body.get(k) not in (None, "")
             }
+            # Identity gates before parameter validation: an unverified
+            # account's input should not be processed at all.
+            if config.hosted() and not identity.email_verified:
+                return self._error(403, "verify your email address before running tasks")
             try:
                 _check_params(params)
                 # A 400 rather than a 500 from deep inside the worker: asking
@@ -374,12 +451,12 @@ class Handler(BaseHTTPRequestHandler):
             except config.ConfigError as exc:
                 return self._error(400, str(exc))
             try:
-                handle = self.manager.create(task, params)
+                handle = self.manager.create(task, params, identity)
             except Exception as exc:  # noqa: BLE001 — e.g. missing API key
                 return self._error(500, f"{type(exc).__name__}: {exc}")
             return self._json(201, handle.meta())
 
-        handle = self._task_or_404(parts[2])
+        handle = self._task_or_404(parts[2], identity)
         if not handle or len(parts) != 4:
             if handle:
                 self._error(404, "unknown endpoint")
@@ -411,15 +488,101 @@ class Handler(BaseHTTPRequestHandler):
 
         return self._error(404, "unknown endpoint")
 
+    # ------------------------------------------------------------------- auth
+
+    def _json_with_cookie(self, status: int, body: dict, cookie: str) -> None:
+        data = json.dumps(body, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Set-Cookie", cookie)
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _auth_get(self, rest: list[str]) -> None:
+        if not config.auth_enabled():
+            return self._error(404, "authentication is not enabled")
+        if rest == ["me"]:
+            identity = self._require_identity()
+            if not identity:
+                return
+            return self._json(200, {
+                "user_id": identity.user_id,
+                "org_id": identity.org_id,
+                "email": identity.email,
+                "email_verified": identity.email_verified,
+            })
+        if rest == ["verify"]:
+            query = parse_qs(urlsplit(self.path).query)
+            token = (query.get("token") or [""])[0]
+            user_id = self.manager.store.consume_verification(token)
+            if not user_id:
+                return self._error(400, "verification link is invalid or expired")
+            return self._json(200, {"verified": True})
+        return self._error(404, "unknown endpoint")
+
+    def _auth_post(self, rest: list[str], body: dict) -> None:
+        if not config.auth_enabled():
+            return self._error(404, "authentication is not enabled")
+        db = self.manager.store
+        if rest == ["register"]:
+            try:
+                user = auth.register(
+                    db,
+                    body.get("email", ""),
+                    body.get("password", ""),
+                    terms_version=(
+                        config.terms_version() if body.get("accept_terms") else None
+                    ),
+                    turnstile_token=body.get("turnstile_token"),
+                    remote_ip=self.client_address[0],
+                )
+            except auth.AuthError as exc:
+                return self._error(400, str(exc))
+            secret = db.create_verification(user["id"])
+            auth.send_verification(
+                user["email"], auth.verification_link(config.app_origin() or "", secret)
+            )
+            return self._json(201, {"user_id": user["id"], "email": user["email"]})
+
+        if rest == ["login"]:
+            try:
+                secret, identity = auth.login(db, body.get("email", ""), body.get("password", ""))
+            except auth.AuthError as exc:
+                return self._error(401, str(exc))
+            return self._json_with_cookie(
+                200,
+                {"user_id": identity.user_id, "org_id": identity.org_id, "email": identity.email},
+                auth.cookie_header(secret),
+            )
+
+        if rest == ["logout"]:
+            secret = auth.session_from_cookies(self.headers.get("Cookie"))
+            if secret:
+                db.revoke_session(secret)
+            return self._json_with_cookie(200, {"ok": True}, auth.clear_cookie_header())
+
+        return self._error(404, "unknown endpoint")
+
     # -------------------------------------------------------------------- sse
 
+    #: Seconds between SSE comment heartbeats.
+    HEARTBEAT_SECONDS = 10
+
+    #: Re-read the session row every sixth 10 s heartbeat. Authorizing only at
+    #: connect means a user who logs out — or is suspended — keeps receiving
+    #: live output until the task ends, and tasks here run for an hour.
+    REAUTH_EVERY_PINGS = 6
+
     def _sse(self, handle: TaskHandle) -> None:
+        secret = auth.session_from_cookies(self.headers.get("Cookie"))
         snapshot, q = self.manager.subscribe(handle)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
+        pings = 0
         try:
             for event in snapshot:
                 self._send_event(event)
@@ -431,8 +594,18 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                     return
                 try:
-                    event = q.get(timeout=10)
+                    event = q.get(timeout=self.HEARTBEAT_SECONDS)
                 except queue.Empty:
+                    pings += 1
+                    if pings % self.REAUTH_EVERY_PINGS == 0 and not self._session_still_valid(
+                        secret, handle
+                    ):
+                        # A typed event, not a silent close: the client must
+                        # know to stop and re-authenticate rather than
+                        # reconnect straight into a login redirect loop.
+                        self.wfile.write(b"event: auth_expired\ndata: {}\n\n")
+                        self.wfile.flush()
+                        return
                     self.wfile.write(b": ping\n\n")
                     self.wfile.flush()
                     continue
@@ -441,6 +614,14 @@ class Handler(BaseHTTPRequestHandler):
             pass
         finally:
             self.manager.unsubscribe(handle, q)
+
+    def _session_still_valid(self, secret: str | None, handle: TaskHandle) -> bool:
+        if not config.auth_enabled():
+            return True
+        identity = auth.identity_for(self.manager.store, secret)
+        # Ownership is re-checked too: a membership can be removed without the
+        # session itself being revoked.
+        return identity is not None and identity.org_id == handle.org_id
 
     def _send_event(self, event: dict) -> None:
         data = json.dumps(event["payload"], sort_keys=True, ensure_ascii=False)

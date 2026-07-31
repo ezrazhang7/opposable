@@ -63,6 +63,25 @@ def allowed_base_urls() -> tuple[str, ...]:
 DEV_SANDBOX_BACKENDS = ("local", "docker")
 
 
+def auth_enabled() -> bool:
+    """Hosted mode always authenticates. Locally it is opt-in, so a
+    self-hoster exposing the server on a LAN can turn it on without pretending
+    to be a multi-tenant deployment."""
+    if hosted():
+        return True
+    return os.environ.get("OPPOSABLE_AUTH", "").strip() not in ("", "0", "false", "no")
+
+
+def app_origin() -> str:
+    """Our own origin, used as the CSRF fallback when Sec-Fetch-Site is
+    absent. Empty locally, where there is no cross-origin threat model."""
+    return os.environ.get("OPPOSABLE_APP_ORIGIN", "").strip().rstrip("/")
+
+
+def terms_version() -> str:
+    return os.environ.get("OPPOSABLE_TERMS_VERSION", "").strip()
+
+
 def sandbox_backend() -> str:
     """The backend hosted mode will actually run. Empty until a microVM
     vendor is chosen and ``OPPOSABLE_SANDBOX_BACKEND`` names it."""
@@ -111,6 +130,14 @@ def preflight() -> list[str]:
         problems.append(
             "0b: OPPOSABLE_DENIED_CIDRS is unset — our own VPC is reachable from a sandbox"
         )
+    if not app_origin():
+        problems.append("0c: OPPOSABLE_APP_ORIGIN is unset — the CSRF fallback cannot work")
+    if not terms_version():
+        problems.append("0g: OPPOSABLE_TERMS_VERSION is unset — acceptance cannot be recorded")
+    if not os.environ.get("OPPOSABLE_TURNSTILE_SECRET", "").strip():
+        problems.append("0c: OPPOSABLE_TURNSTILE_SECRET is unset — signup has no bot gate")
+    if not os.environ.get("OPPOSABLE_MAIL_PROVIDER", "").strip():
+        problems.append("0c: OPPOSABLE_MAIL_PROVIDER is unset — email cannot be verified")
     return problems
 
 

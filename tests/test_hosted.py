@@ -5,9 +5,11 @@ account would try. They are not "does the feature work" tests — they are the
 exit criterion for opening the door, so a failure here blocks a deploy.
 """
 
+import http.client
 import json
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -15,11 +17,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 
-from opposable import config, egress
+from opposable import auth, config, egress
+from opposable.providers import ToolCall
 from opposable.sandbox import SANDBOX_ENV_ALLOWLIST, LocalSandbox, sandbox_env
 from opposable.server import _check_params
 
-from .test_server import SCRIPT, request, start_server
+from .test_server import SCRIPT, request, start_server, turn
 
 SECRETS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
 
@@ -27,7 +30,50 @@ SECRETS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
 @pytest.fixture
 def hosted(monkeypatch):
     monkeypatch.setenv("OPPOSABLE_HOSTED", "1")
+    monkeypatch.setenv("OPPOSABLE_TERMS_VERSION", "2026-07-31")
     return config
+
+
+PASSWORD = "correct-horse-battery-staple"
+
+
+def sign_up(port, email, password=PASSWORD, store=None):
+    """Register, log in, and return request headers carrying that session.
+
+    Pass ``store`` to skip the email gate for tests that are about something
+    else; the gate itself has its own test.
+    """
+    status, body = request(
+        port, "POST", "/api/auth/register",
+        {"email": email, "password": password, "accept_terms": True},
+        headers=SAME_ORIGIN,
+    )
+    assert status == 201, body
+    if store is not None:
+        store.mark_email_verified(store.user_by_email(email)["id"])
+    secret = _cookie_value(port, email, password)
+    return {**SAME_ORIGIN, "Cookie": f"{auth.COOKIE_NAME}={secret}"}
+
+
+def _cookie_value(port, email, password):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    conn.request(
+        "POST", "/api/auth/login",
+        body=json.dumps({"email": email, "password": password}).encode(),
+        headers={"Content-Type": "application/json", **SAME_ORIGIN},
+    )
+    resp = conn.getresponse()
+    resp.read()
+    cookie = resp.getheader("Set-Cookie") or ""
+    conn.close()
+    value = cookie.split(";")[0]
+    assert value.startswith(auth.COOKIE_NAME + "="), cookie
+    return value.split("=", 1)[1]
+
+
+#: Browsers set this and page script cannot forge it, which is the property a
+#: CSRF check needs. The test client has to send it like a browser would.
+SAME_ORIGIN = {"Sec-Fetch-Site": "same-origin"}
 
 
 # --------------------------------------------------------------- 0a: env leak
@@ -68,9 +114,11 @@ def test_hosted_refuses_a_client_supplied_base_url(tmp_path, hosted):
     """Pointing base_url at your own server made our Authorization header
     arrive at a host you control."""
     httpd, port = start_server(tmp_path, SCRIPT)
+    headers = sign_up(port, "byok@example.com", store=httpd.manager.store)
     status, body = request(
         port, "POST", "/api/tasks",
         {"task": "x" * 100, "base_url": "https://attacker.example/v1"},
+        headers=headers,
     )
     assert status == 400 and "base_url" in body["error"]
     assert httpd.manager.list() == []
@@ -80,9 +128,11 @@ def test_hosted_refuses_a_client_supplied_base_url(tmp_path, hosted):
 def test_hosted_allows_only_allowlisted_base_urls(tmp_path, hosted, monkeypatch):
     monkeypatch.setenv("OPPOSABLE_ALLOWED_BASE_URLS", "https://api.openai.com/v1")
     httpd, port = start_server(tmp_path, SCRIPT)
+    headers = sign_up(port, "byok2@example.com", store=httpd.manager.store)
     status, _ = request(
         port, "POST", "/api/tasks",
         {"task": "x" * 100, "base_url": "https://api.openai.com.evil.example/v1"},
+        headers=headers,
     )
     assert status == 400
     httpd.shutdown()
@@ -93,10 +143,14 @@ def test_hosted_allows_only_allowlisted_base_urls(tmp_path, hosted, monkeypatch)
 
 def test_hosted_refuses_unlisted_model_and_image(tmp_path, hosted):
     httpd, port = start_server(tmp_path, SCRIPT)
-    status, body = request(port, "POST", "/api/tasks", {"task": "x" * 100, "model": "gpt-9-ultra"})
+    headers = sign_up(port, "models@example.com", store=httpd.manager.store)
+    status, body = request(
+        port, "POST", "/api/tasks", {"task": "x" * 100, "model": "gpt-9-ultra"}, headers=headers
+    )
     assert status == 400 and "model" in body["error"]
     status, body = request(
-        port, "POST", "/api/tasks", {"task": "x" * 100, "image": "attacker/backdoor:latest"}
+        port, "POST", "/api/tasks", {"task": "x" * 100, "image": "attacker/backdoor:latest"},
+        headers=headers,
     )
     assert status == 400 and "image" in body["error"]
     httpd.shutdown()
@@ -198,6 +252,273 @@ def test_task_records_an_immutable_manifest(tmp_path):
         .read_text(encoding="utf-8")
     )
     assert manifest["kind"] == "local" and "created" in manifest
+    httpd.shutdown()
+
+
+# -------------------------------------------------- 0c: identity and ownership
+
+
+@pytest.fixture
+def multi_user(monkeypatch):
+    """Auth on, but not hosted — the self-hoster-on-a-LAN case, which is the
+    only way to exercise tenant isolation while a runnable sandbox exists."""
+    monkeypatch.setenv("OPPOSABLE_AUTH", "1")
+    monkeypatch.setenv("OPPOSABLE_TERMS_VERSION", "2026-07-31")
+
+
+def test_api_requires_authentication(tmp_path, multi_user):
+    httpd, port = start_server(tmp_path, SCRIPT)
+    for method, path in [
+        ("GET", "/api/tasks"),
+        ("GET", "/api/tasks/abcdef12"),
+        ("POST", "/api/tasks"),
+    ]:
+        status, _ = request(port, method, path, {} if method == "POST" else None, SAME_ORIGIN)
+        assert status == 401, f"{method} {path}"
+    httpd.shutdown()
+
+
+def test_another_tenants_task_is_404_never_403(tmp_path, multi_user):
+    """A 403 confirms the id exists and turns a blind scan into an oracle."""
+    httpd, port = start_server(tmp_path, SCRIPT)
+    alice = sign_up(port, "alice@example.com")
+    mallory = sign_up(port, "mallory@example.com")
+
+    status, meta = request(port, "POST", "/api/tasks", {"task": "x" * 100}, alice)
+    assert status == 201
+    task_id = meta["id"]
+
+    for method, path, body in [
+        ("GET", f"/api/tasks/{task_id}", None),
+        ("GET", f"/api/tasks/{task_id}/files", None),
+        ("GET", f"/api/tasks/{task_id}/files/report.md", None),
+        ("POST", f"/api/tasks/{task_id}/stop", {}),
+        ("POST", f"/api/tasks/{task_id}/messages", {"text": "hi"}),
+        ("POST", f"/api/tasks/{task_id}/resume", {}),
+    ]:
+        status, body_out = request(port, method, path, body, mallory)
+        assert status == 404, f"{method} {path} -> {status}"
+        assert "no such task" in body_out.get("error", ""), "the message must not differ either"
+
+    # ...and it is invisible in the listing
+    _, listing = request(port, "GET", "/api/tasks", None, mallory)
+    assert listing == []
+    _, listing = request(port, "GET", "/api/tasks", None, alice)
+    assert [t["id"] for t in listing] == [task_id]
+    httpd.shutdown()
+
+
+def test_task_ids_are_full_uuid4(tmp_path, multi_user):
+    httpd, port = start_server(tmp_path, SCRIPT)
+    headers = sign_up(port, "ids@example.com")
+    _, meta = request(port, "POST", "/api/tasks", {"task": "x" * 100}, headers)
+    assert len(meta["id"]) == 32, "8 hex chars is 32 bits: enumerable, and collides at ~65k tasks"
+    int(meta["id"], 16)
+    httpd.shutdown()
+
+
+def test_legacy_eight_hex_ids_still_resolve(tmp_path, multi_user):
+    """Old URLs must not 404. The directory name is the mapping."""
+    legacy = tmp_path / ".opposable-ab12cd34" / ".opposable" / "state"
+    legacy.mkdir(parents=True)
+    httpd, port = start_server(tmp_path, SCRIPT)
+    headers = sign_up(port, "legacy@example.com")
+    org_id = request(port, "GET", "/api/auth/me", None, headers)[1]["org_id"]
+    (legacy / "meta.json").write_text(
+        json.dumps({"task": "old task", "created": 1.0, "status": "complete", "org_id": org_id}),
+        encoding="utf-8",
+    )
+    status, detail = request(port, "GET", "/api/tasks/ab12cd34", None, headers)
+    assert status == 200 and detail["task"] == "old task"
+    httpd.shutdown()
+
+
+def test_task_id_cannot_traverse_out_of_the_base_directory(tmp_path, multi_user):
+    httpd, port = start_server(tmp_path, SCRIPT)
+    headers = sign_up(port, "traverse@example.com")
+    for bad in ("../../etc", "..%2f..%2fetc", "a" * 200, "not-hex"):
+        status, _ = request(port, "GET", f"/api/tasks/{bad}", None, headers)
+        assert status == 404
+    httpd.shutdown()
+
+
+def test_mutating_requests_need_a_same_origin_signal(tmp_path, multi_user, monkeypatch):
+    monkeypatch.setenv("OPPOSABLE_APP_ORIGIN", "https://opposable.example")
+    httpd, port = start_server(tmp_path, SCRIPT)
+    headers = sign_up(port, "csrf@example.com")
+    cookie = {"Cookie": headers["Cookie"]}
+
+    status, body = request(
+        port, "POST", "/api/tasks", {"task": "x" * 100},
+        {**cookie, "Sec-Fetch-Site": "cross-site"},
+    )
+    assert status == 403 and "cross-site" in body["error"]
+    # No Sec-Fetch-Site and no Origin is refused too, rather than guessed at
+    status, _ = request(port, "POST", "/api/tasks", {"task": "x" * 100}, cookie)
+    assert status == 403
+    status, _ = request(
+        port, "POST", "/api/tasks", {"task": "x" * 100},
+        {**cookie, "Origin": "https://opposable.example"},
+    )
+    assert status == 201
+    httpd.shutdown()
+
+
+def test_session_cookie_carries_the_right_attributes(tmp_path, multi_user):
+    httpd, port = start_server(tmp_path, SCRIPT)
+    request(
+        port, "POST", "/api/auth/register",
+        {"email": "cookie@example.com", "password": PASSWORD, "accept_terms": True},
+        SAME_ORIGIN,
+    )
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    conn.request(
+        "POST", "/api/auth/login",
+        body=json.dumps({"email": "cookie@example.com", "password": PASSWORD}).encode(),
+        headers={"Content-Type": "application/json", **SAME_ORIGIN},
+    )
+    resp = conn.getresponse()
+    resp.read()
+    cookie = resp.getheader("Set-Cookie")
+    conn.close()
+    assert cookie.startswith("__Host-")
+    for attribute in ("Secure", "HttpOnly", "SameSite=Lax", "Path=/"):
+        assert attribute in cookie
+    # __Host- is only enforceable if there is no Domain attribute
+    assert "Domain=" not in cookie
+    httpd.shutdown()
+
+
+def test_logout_revokes_the_session_immediately(tmp_path, multi_user):
+    httpd, port = start_server(tmp_path, SCRIPT)
+    headers = sign_up(port, "logout@example.com")
+    assert request(port, "GET", "/api/auth/me", None, headers)[0] == 200
+    assert request(port, "POST", "/api/auth/logout", {}, headers)[0] == 200
+    assert request(port, "GET", "/api/auth/me", None, headers)[0] == 401
+    httpd.shutdown()
+
+
+def test_suspension_revokes_every_session(tmp_path, multi_user):
+    httpd, port = start_server(tmp_path, SCRIPT)
+    headers = sign_up(port, "suspended@example.com")
+    user = httpd.manager.store.user_by_email("suspended@example.com")
+    httpd.manager.store.suspend_user(user["id"], "abuse")
+    assert request(port, "GET", "/api/auth/me", None, headers)[0] == 401
+    httpd.shutdown()
+
+
+def test_sse_closes_when_the_session_is_revoked_mid_stream(tmp_path, multi_user, monkeypatch):
+    """Today auth is checked once at connect, so a logged-out user keeps
+    receiving live output for the rest of an hour-long run."""
+    from opposable.server import Handler
+
+    monkeypatch.setattr(Handler, "HEARTBEAT_SECONDS", 0.2)
+    monkeypatch.setattr(Handler, "REAUTH_EVERY_PINGS", 1)
+    many = [
+        turn(ToolCall(f"t{i}", "shell_exec", {"command": "echo tick"})) for i in range(200)
+    ]
+    httpd, port = start_server(tmp_path, many, slow=True)
+    headers = sign_up(port, "revoked@example.com")
+    _, meta = request(port, "POST", "/api/tasks", {"task": "x" * 200}, headers)
+
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    conn.request("GET", f"/api/tasks/{meta['id']}/events", headers=headers)
+    resp = conn.getresponse()
+    resp.readline()  # at least one line proves the stream is live
+    request(port, "POST", "/api/auth/logout", {}, headers)
+
+    deadline = time.time() + 20
+    saw = ""
+    while time.time() < deadline:
+        line = resp.readline().decode("utf-8")
+        if not line:
+            break
+        if line.startswith("event: auth_expired"):
+            saw = line
+            break
+    conn.close()
+    request(port, "POST", f"/api/tasks/{meta['id']}/stop", {}, headers)
+    httpd.shutdown()
+    assert saw, "a revoked session must be told, not silently dropped"
+
+
+def test_credentials_are_never_stored_in_the_clear(tmp_path, multi_user):
+    httpd, port = start_server(tmp_path, SCRIPT)
+    headers = sign_up(port, "hashes@example.com")
+    raw = (tmp_path / ".opposable-identity.db").read_bytes()
+    assert PASSWORD.encode() not in raw
+    secret = headers["Cookie"].split("=", 1)[1]
+    assert secret.encode() not in raw, "sessions are stored as sha256, never as the secret"
+    httpd.shutdown()
+
+
+def test_signup_gates(tmp_path, multi_user):
+    httpd, port = start_server(tmp_path, SCRIPT)
+
+    def register(email, password=PASSWORD, **extra):
+        return request(
+            port, "POST", "/api/auth/register",
+            {"email": email, "password": password, "accept_terms": True, **extra},
+            SAME_ORIGIN,
+        )
+
+    assert register("someone@mailinator.com")[0] == 400
+    assert register("someone@example.com", password="short")[0] == 400
+    assert register("nobody-at-all")[0] == 400
+    assert register("dupe@example.com")[0] == 201
+    assert register("dupe@example.com")[0] == 400
+    httpd.shutdown()
+
+
+def test_login_is_not_an_account_existence_oracle(tmp_path, multi_user):
+    httpd, port = start_server(tmp_path, SCRIPT)
+    sign_up(port, "real@example.com")
+    _, wrong_password = request(
+        port, "POST", "/api/auth/login", {"email": "real@example.com", "password": "nope-nope-nope"},
+        SAME_ORIGIN,
+    )
+    _, no_such_user = request(
+        port, "POST", "/api/auth/login", {"email": "ghost@example.com", "password": "nope-nope-nope"},
+        SAME_ORIGIN,
+    )
+    assert wrong_password == no_such_user
+    httpd.shutdown()
+
+
+def test_hosted_requires_a_verified_email_before_running_tasks(tmp_path, hosted, monkeypatch):
+    monkeypatch.setenv("OPPOSABLE_SANDBOX_BACKEND", "microvm")
+    httpd, port = start_server(tmp_path, SCRIPT)
+    headers = sign_up(port, "unverified@example.com")
+    status, body = request(port, "POST", "/api/tasks", {"task": "x" * 100}, headers)
+    assert status == 403 and "verify your email" in body["error"]
+
+    store = httpd.manager.store
+    user = store.user_by_email("unverified@example.com")
+    token = store.create_verification(user["id"])
+    assert request(port, "GET", f"/api/auth/verify?token={token}", None, headers)[0] == 200
+    # the sandbox backend is a stub name, so this gets past auth and fails
+    # later -- what matters is that it is no longer the email gate
+    status, body = request(port, "POST", "/api/tasks", {"task": "x" * 100}, headers)
+    assert status != 403
+    httpd.shutdown()
+
+
+def test_registration_records_terms_acceptance(tmp_path, hosted):
+    httpd, port = start_server(tmp_path, SCRIPT)
+    sign_up(port, "terms@example.com")
+    user = httpd.manager.store.user_by_email("terms@example.com")
+    assert user["terms_version"] == "2026-07-31" and user["terms_accepted_at"]
+    httpd.shutdown()
+
+
+def test_hosted_registration_requires_affirmative_acceptance(tmp_path, hosted):
+    httpd, port = start_server(tmp_path, SCRIPT)
+    status, body = request(
+        port, "POST", "/api/auth/register",
+        {"email": "noterms@example.com", "password": PASSWORD},
+        SAME_ORIGIN,
+    )
+    assert status == 400 and "terms of service" in body["error"]
     httpd.shutdown()
 
 
@@ -355,12 +676,15 @@ def test_sandbox_env_carries_the_proxy(monkeypatch):
 
 def test_hosted_refuses_development_sandboxes(tmp_path, hosted):
     httpd, port = start_server(tmp_path, SCRIPT)
+    headers = sign_up(port, "boxes@example.com", store=httpd.manager.store)
     for kind in ("docker", "local"):
-        status, body = request(port, "POST", "/api/tasks", {"task": "x" * 100, "sandbox": kind})
+        status, body = request(
+            port, "POST", "/api/tasks", {"task": "x" * 100, "sandbox": kind}, headers=headers
+        )
         assert status == 400 and "development-only" in body["error"]
     # ...including the default, so hosted mode cannot run a task at all until
     # a microVM backend exists.
-    status, body = request(port, "POST", "/api/tasks", {"task": "x" * 100})
+    status, body = request(port, "POST", "/api/tasks", {"task": "x" * 100}, headers=headers)
     assert status == 400 and "development-only" in body["error"]
     httpd.shutdown()
 
