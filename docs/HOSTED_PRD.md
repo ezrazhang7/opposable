@@ -10,6 +10,7 @@
 
 ## 1. Non-goals for v1
 
+- **Pooled inference, credits, and billing for tokens.** v1 is BYOK-only (§8); the only pooled spend is a capped trial.
 - Teams/orgs beyond a stub `orgs` table (schema supports it; no UI).
 - SSO/SAML. The auth choice keeps it a config change, not a migration.
 - Mobile apps, on-prem/VPC delivery, data residency.
@@ -75,7 +76,9 @@ Corollary trap: if the agent stays in-process behind `run_in_threadpool`, it con
 
 ## 4. Isolation — buy it
 
-**Decision: a pluggable sandbox backend with `pause`/`resume`/`snapshot`, pointed at a managed Firecracker sandbox. Never `LocalSandbox`, and never bare `docker run`.**
+**Decision: a pluggable sandbox backend with `pause`/`resume`/`snapshot`, pointed at a managed microVM. Never `LocalSandbox`, and never bare `docker run`.**
+
+**microVM, not gVisor.** A container shares one kernel with every other tenant — one kernel bug and a stranger is out of their room and into the building. A microVM (Firecracker) is a separate machine with its own kernel, booting in ~125 ms; escaping means breaking the virtualization layer, a far smaller and harder target. gVisor's userspace kernel is a genuine improvement on plain containers and its only true host escape on record is from 2018, but it is still weaker than a VM and costs 10–30% on I/O-heavy work — which is precisely what an agent running `git clone` and `npm install` does all day. gVisor stays a reasonable option for people self-hosting `opposable`; the hosted path is microVM only.
 
 SWE-agent extracted exactly this abstraction (SWE-ReX) after hard-coding Docker made parallelism brittle; it now targets Local, Docker, Modal, Fargate and Daytona behind one interface. Our `Sandbox` class is already close. **Build the interface before picking the vendor** — it is what makes the vendor choice reversible, which matters because the most attractive option is also the least verified.
 
@@ -83,9 +86,9 @@ SWE-agent extracted exactly this abstraction (SWE-ReX) after hard-coding Docker 
 |---|---|---|---|---|---|
 | **Fly Sprites** ⚠️ | Firecracker | ~$0.32 | **none — idle free**, ~$0.02/GB-mo | ~300 ms | 100 GB NVMe survives hibernate |
 | **E2B Pro** | Firecracker | $0.166 + $150/mo | full wall-clock | ~1 s | pause keeps FS **+ memory**, indefinite |
-| **Modal** | gVisor | ~$0.24 | yes | sub-second | FS + memory snapshots; **24 h cap** |
 | **Fargate** | Firecracker | **$0.079** ARM | n/a | seconds | **none — build S3 archive yourself** |
-| **Cloudflare Containers** | per-instance VM | ~$0.18 CPU-pegged | **active CPU only** | 1–3 s | **fresh disk on wake — disqualifying** |
+| ~~Modal~~ | gVisor | ~$0.24 | yes | sub-second | ruled out: not a microVM |
+| ~~Cloudflare Containers~~ | per-instance VM | ~$0.18 | active CPU only | 1–3 s | ruled out: **fresh disk on wake** |
 
 ⚠️ **Fly Sprites pricing is attested only by third-party blogs, one of them a competitor's, for a product ~7 months old. Prototype the resume path and confirm rates with Fly before designing around it.** E2B is the more proven fallback but bills wall-clock — and an agent spends most of its wall-clock *waiting on the LLM*, so a sandbox that is 10% CPU-busy pays full freight. E2B also has an [open bug where files stop persisting after repeated resumes](https://github.com/e2b-dev/E2B/issues/884); treat memory snapshots as an optimisation and archive the filesystem independently.
 
@@ -105,11 +108,13 @@ Store an immutable per-task manifest (base image digest, env, workdir archive po
 
 ## 5. Auth
 
-**Decision: Supabase Auth. Opaque, DB-backed sessions in a `__Host-` cookie. Same-origin.**
+**Decided: Supabase Auth. Opaque, DB-backed sessions in a `__Host-` cookie. Same-origin.**
 
 We are migrating to Postgres regardless; Supabase bundles Postgres + Auth + RLS + object storage at $25/mo covering 100k MAU, and RLS policies key off `auth.uid()` natively — which matters in a stdlib codebase with hand-rolled SQL and **no ORM to centralise a tenant filter**. Python-side cost is JWKS verification with PyJWT.
 
-Runner-up: **WorkOS AuthKit**, free to 1M MAU with a cookie-first sealed-session model. Pick it if we'd rather not couple auth to the database vendor. Auth0 is the most expensive at every tier with a ~4× jump for orgs. Keycloak's $0 is fictional for a solo operator — an internet-facing IdP you patch forever.
+Considered and rejected: **WorkOS AuthKit** — an identity product rather than a backend platform, free to 1M MAU, with far stronger SAML/SCIM when enterprise SSO eventually matters, but it leaves us running Postgres separately and buys nothing at launch. **Auth0** is the most expensive at every tier with a ~4× jump for orgs. **Keycloak**'s $0 is fictional for a solo operator — an internet-facing IdP to patch forever.
+
+Lock-in is bounded by design: the session is our own opaque token in our own `sessions` table, so the identity provider is swappable without touching the SSE, authorization, or share-link layers.
 
 | | 100 MAU | 1k | 10k | +SSO later |
 |---|---|---|---|---|
@@ -193,19 +198,36 @@ ledger(id, org_id, task_id, kind, amount_micros, created_at)
 
 **Prompt injection is not solvable at the model layer** — OpenAI's CSO called it unsolved and the NCSC concurs. Design the blast radius instead. Both 2026 CVEs in this space were *denylist and allowlist bypasses* (CVE-2026-2256 obfuscated past a dangerous-command denylist; CVE-2026-22708 poisoned env vars so allowlisted `git branch` carried the payload). Containment, not filtering.
 
-### Cost control: BYOK first
+### Cost control: BYOK only at launch
 
-**Decision: BYOK at launch; pooled credits as a paid-only upgrade.**
+**Decided: BYOK only for v1. No pooled inference, no credit ledger, no billing system in the first release. Pooled credits are a v2 upsell for people who don't want to manage a key.**
 
-It transfers the runaway tail to the user, and it is free KYC — a working provider key means someone already passed a card-verified signup at a provider with its own fraud stack.
+It transfers the runaway tail to the user, and it is free KYC — a working provider key means someone already passed a card-verified signup at a provider with its own fraud stack. It also removes reseller liability, and it removes billing, invoicing and sales tax from the critical path to opening the door.
 
-Per-task cost at ~30 turns with prompt caching on: **~$0.44 Haiku 4.5 · ~$1.32 Sonnet 5 · ~$2.20 Opus 5**. A stuck Opus loop at ~1M context burns **~$24/hour — ~$480 overnight.** That is the scenario, and it needs one well-meaning user, not an attacker. Default to Sonnet 5; make Opus explicit opt-in. *(Model prices: Opus 5 $5/$25, Sonnet 5 $3/$15, Haiku 4.5 $1/$5 per Mtok — verify live before building a pricing page.)*
+Per-task cost at ~30 turns with prompt caching on: **~$0.44 Haiku 4.5 · ~$1.32 Sonnet 5 · ~$2.20 Opus 5**. A stuck Opus loop at ~1M context burns **~$24/hour — ~$480 overnight.** That is the scenario BYOK makes someone else's problem, and it needs one well-meaning user, not an attacker. Default to Sonnet 5; make Opus explicit opt-in. *(Model prices: Opus 5 $5/$25, Sonnet 5 $3/$15, Haiku 4.5 $1/$5 per Mtok — verify live before building a pricing page.)*
 
 BYOK keys go in a secret manager with a reference in Postgres — never the primary DB, never logs (scrub at the logger, assert in tests), never the sandbox. **BYOK does not exempt us from the provider's usage policy:** Anthropic's applies to anyone submitting inputs *"including via any authorized resellers or passthrough access."* Our AUP must be at least as strict and actually enforced.
 
-Pooled tier guards: per-task hard cap $2 (Sonnet) / $5 (Opus, paid), per-user daily $10, 2 concurrent free / 5 paid, kill at 60 turns or 25 min, org circuit breaker at 3× the rolling 7-day median hourly. Enforce with **atomic Redis reservation at the gateway** — per-call checks in application code never catch an agent making 500 sequential calls.
+When pooled arrives in v2: per-task hard cap $2 (Sonnet) / $5 (Opus), per-user daily $10, kill at 60 turns or 25 min, org circuit breaker at 3× the rolling 7-day median hourly, enforced by **atomic Redis reservation at the gateway** — per-call checks in application code never catch an agent making 500 sequential calls.
 
-**Free tier = a rate, not a balance.** $0.25 one-time, non-renewing. A monthly-refilling free tier is an abuse subscription; Manus's 300-credits/day refresh is the right shape. Signup ladder: Turnstile + email verify + disposable-domain blocklist → tiny credit; card-on-file to go further. Counterintuitively this *helps* revenue — requiring a card cuts signups ~22% but roughly triples paying customers (~4–6% → ~30% per ChartMogul's Jan-2026 cohort of 200 B2B products).
+### What we actually sell
+
+BYOK-only is not a revenue model *if the product is framed as model access*. It isn't. **The user brings the brain; we rent the hands** — a sandbox that runs without their laptop open, keeps its files for days, replays every step, and can be shared.
+
+So the subscription is priced on **sandbox-hours, concurrency, and retention**, never on tokens:
+
+| | Free | Paid (~$10/mo) |
+|---|---|---|
+| Sandbox-hours / month | ~2 | ~40 |
+| Concurrent tasks | 1 | 3 |
+| Task retention before archive | 24 h | 30 d |
+| Share links | 1 active | unlimited |
+
+At ~$0.03–0.05/vCPU-hour, 40 bundled sandbox-hours cost us **$2–4 against $10 of revenue — roughly 70% margin, and no token exposure at all.** That is a *better* business than reselling inference, where the industry sits at 50–60% gross with inference COGS rising as a share of spend.
+
+**The friction to design around is the key wall**, not the price. "Go make an API key and paste it" kills casual signups harder than any card prompt. Mitigate with a **pooled trial on our key: 2–3 tasks, capped at ~$1 total, email-verified, no card** — enough to feel the product before committing. This is the one place pooled inference exists in v1, and its budget is small enough to treat as marketing spend.
+
+**Free tier = a rate, not a balance.** Non-renewing sandbox-hours, not a monthly refill — a refilling free tier is an abuse subscription; Manus's daily-refresh shape is the right one. Signup ladder: Turnstile + email verify + disposable-domain blocklist → trial; a valid provider key → free tier; card → paid. Note that gating harder *helps* revenue: requiring a card cuts signups ~22% but roughly triples paying customers (~4–6% → ~30%, ChartMogul's Jan-2026 cohort of 200 B2B products).
 
 Rate-limit on **money and device fingerprint**, not IP. Residential proxy networks rotate millions of IPs; Cloudflare, GreyNoise and an FBI/IC3 PSA (March 2026) all say the same thing — score behaviour, not origin.
 
@@ -213,12 +235,13 @@ Rate-limit on **money and device fingerprint**, not IP. Residential proxy networ
 
 ## 9. Unit economics
 
-- Tokens dominate: sandbox compute is ~$0.03–0.05/vCPU-hr against $1–3 of tokens per task — roughly **50–100× in favour of tokens.** Optimise token controls first.
-- Agentic runs are **1M–3.5M tokens per coding-class task including retries, with up to 30× variance across runs of the same task.** Any flat price is a bet against that variance.
-- AI products run **50–60% gross margins vs 80–90% for classic SaaS**, with inference COGS rising as a share of spend.
-- Everyone converged on a usage meter (Manus credits, Devin ACUs at ~$2.25/ACU ≈ 15 min, Replit effort units) — and Replit's is the market's loudest source of customer anger precisely because *the platform decides how much effort a request takes and prices it after the fact*; reports cite $180/mo → ~$1,000 in a week.
+**Under BYOK the expensive half of the bill isn't ours.** Tokens run $1–3 per task against $0.03–0.05/vCPU-hour of sandbox — roughly **50–100× in favour of tokens** — and that entire side sits on the user's provider account. Our COGS is sandbox-hours plus storage, which is exactly what §8 prices. This is the whole argument for BYOK-first: it converts the volatile, unbounded cost into someone else's, and leaves us selling something with a stable unit cost.
 
-**The differentiator, and it is nearly free for us:** pair the meter with a **pre-run estimate, a hard per-task cap, and a mid-run kill with partial billing** — surfaced as a live credit burn-down in the computer panel we already built. Stop already works.
+What that volatility looks like, and why we don't want it in v1: agentic runs burn **1M–3.5M tokens per coding-class task including retries, with up to 30× variance across runs of the same task.** Any flat price is a bet against that variance. AI products run **50–60% gross margins against 80–90% for classic SaaS**, with inference COGS rising as a share of spend. Selling sandbox-hours at ~70% margin is a better business than reselling inference, and it stops being a bet.
+
+Our residual exposure in v1 is small and bounded: the pooled trial (~$1/signup, capped, treated as marketing) and idle sandboxes. **Idle is the one that bites** — an unbounded pool of parked VMs is how you accidentally run a free VPS host. The §4 lifecycle (pause at 5–15 min idle, archive at 7 d, delete at 30 d) is the cost control, not a nicety.
+
+When pooled inference arrives in v2, the lesson from the market is about *legibility*, not price: everyone converged on a usage meter (Manus credits, Devin ACUs at ~$2.25/ACU ≈ 15 min, Replit effort units), and Replit's is the loudest source of customer anger precisely because *the platform decides how much effort a request takes and prices it after the fact* — reports cite $180/mo becoming ~$1,000 in a week. **The differentiator is nearly free for us:** a pre-run estimate, a hard per-task cap, and a mid-run kill with partial billing, surfaced as a live burn-down in the computer panel we already built. Stop already works.
 
 ---
 
@@ -226,7 +249,47 @@ Rate-limit on **money and device fingerprint**, not IP. Residential proxy networ
 
 Each stage ships independently and leaves the system working.
 
-**Stage 0 — ship-blockers.** Default sandbox to isolated; `LocalSandbox` becomes dev-only and loudly warned. Scrub the sandbox environment. Remove/allowlist client `base_url`. Widen task IDs. Add auth + ownership. Serve user files off a separate domain. Filter `.opposable/` server-side. *No public exposure before all of these.*
+### Stage 0 — ship-blockers
+
+**Nothing is publicly reachable until every box is ticked.** Ordered so each task stands alone; the first group is a day's work and closes the worst holes.
+
+**0a — stop leaking credentials** (no new infrastructure, do first)
+
+- [ ] `sandbox.py:81` — replace `env={**os.environ, …}` with an explicit allowlist (`PATH`, `HOME`, `LANG`, `OPPOSABLE_SANDBOX`, `TERM`). Nothing else crosses into a sandbox, ever.
+- [ ] `server.py` create params — drop `base_url` from the client-settable set, or validate against a server-side allowlist. Today it redirects our `Authorization: Bearer` to an arbitrary host (`providers.py:144-150`).
+- [ ] Same treatment for `model` and `image`: allowlist, don't pass through.
+- [ ] Add a test asserting a task cannot read `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` from its shell.
+
+**0b — make the sandbox a sandbox**
+
+- [ ] Add `pause()` / `resume()` / `snapshot()` to the `Sandbox` interface; keep `exec`/`write_file`/`read_file` as-is. Do this *before* choosing a vendor — it is what keeps the choice reversible.
+- [ ] Implement a `MicroVMSandbox` backend against the chosen provider (§4); ship `LocalSandbox` and `DockerSandbox` as dev-only, refusing to start when a `OPPOSABLE_HOSTED=1` env flag is set.
+- [ ] Harden `DockerSandbox` anyway for self-hosters: `--cap-drop=ALL --security-opt no-new-privileges:true --pids-limit=512 --memory=4g --memory-swap=4g --cpus=2 --read-only --tmpfs /tmp:size=1g --user 1000:1000 --network <isolated>`.
+- [ ] Replace `write_file`'s `shlex.quote`-onto-the-command-line with `docker cp`/stdin — it breaks on large files at `ARG_MAX` today.
+- [ ] Egress: default-deny + allowlist proxy, link-local and RFC1918 blocked, DNS re-resolved after every redirect, SMTP ports closed, IMDSv2 + hop limit 1, sandboxes in their own cloud account.
+
+**0c — identity and ownership**
+
+- [ ] Supabase project; `users` / `orgs` / `memberships` / `sessions` tables per §6.
+- [ ] Session cookie: `__Host-`, `HttpOnly`, `Secure`, `SameSite=Lax`; opaque token, `sha256` stored.
+- [ ] `Sec-Fetch-Site: same-origin` check on every mutating request, `Origin` check as fallback.
+- [ ] Add `org_id` to tasks; every handler does a scoped fetch (`WHERE id = $1 AND org_id = $ctx`) and returns **404, not 403**, across tenants.
+- [ ] SSE: authorize at connect, then re-validate the session row every ~60 s on the existing heartbeat; emit `event: auth_expired` and close on revoke. Client calls `close()` before refreshing.
+- [ ] Widen task IDs to full `uuid4()`; add `legacy_task_ids` so existing 8-hex URLs still resolve.
+
+**0d — stop serving user content on our origin**
+
+- [ ] Serve `/files/*` from a separate registrable domain, with `nosniff`, `Content-Disposition: attachment` outside a small preview allowlist, and `Content-Security-Policy: default-src 'none'; sandbox`.
+- [ ] Filter `.opposable/` server-side in `_list_files` — it currently ships internal state to the client with a flag and trusts the UI to hide it.
+- [ ] Add a CSP to the SPA itself; it has none today.
+
+**0e — the paperwork that gates the door**
+
+- [ ] ToS + AUP with the provider's prohibited-use list flowed down, accepted by affirmative click at registration.
+- [ ] Privacy policy + retention schedule, with backup retention matching it.
+- [ ] Monitored `abuse@`, DMCA agent registered ($6), structured audit log of every command/URL/file with ≥30 d retention.
+
+*Exit criterion: a hostile user with a valid account can obtain nothing from the host, reach nothing on our network, and see nothing belonging to another user.*
 
 **Stage 1 — protocol correctness, still one process.** Honour `Last-Event-ID` (header + query fallback); 204 for a terminal task with no missed events; emit `retry:`; hold the events file open and move fan-out outside the lock; bound subscriber queues and the task cache; nginx with `proxy_buffering off`, gzip off, HTTP/2; SIGTERM → checkpoint. *Exit: a client disconnects mid-task and reconnects with zero duplicates and zero gaps.*
 
@@ -246,10 +309,22 @@ Retention: commands/URLs/spend 30–90 d · transcripts 30 d default · security
 
 ---
 
-## 12. Open questions
+## 12. Decisions and open questions
 
-1. **Verify Fly Sprites pricing and the resume path with a prototype** before designing the lifecycle around it — the newest claim here and the one carrying the most weight.
-2. BYOK-only at launch, or BYOK + a paid pooled tier from day one? Affects whether the credit ledger is v1 or v2.
-3. Supabase vs WorkOS — coupling auth to the database vendor is the real trade, not the price.
-4. Do we run our own egress proxy or buy a platform whose egress policy is good enough? Nothing in §8's list comes free with any vendor.
+**Decided**
+
+| | Decision | Where |
+|---|---|---|
+| Isolation | microVM per task, behind a pluggable backend. Not gVisor, not bare containers. | §4 |
+| Auth | Supabase. Opaque DB-backed sessions in a `__Host-` cookie, same-origin. | §5 |
+| Inference | BYOK only in v1. No credit ledger, no billing. Pooled is a v2 upsell. | §8 |
+| Pricing | Sandbox-hours, concurrency and retention — never tokens. | §8 |
+| Agent loop | Not rewritten. Async edge, synchronous workers. | §3 |
+
+**Still open**
+
+1. **Which microVM vendor.** Fly Sprites has the best economics on paper (idle-free billing, ~300 ms resume) but its pricing is attested only by third-party blogs, one a competitor's, for a seven-month-old product. **Prototype the resume path and confirm rates before designing the lifecycle around it.** E2B is the proven fallback but bills wall-clock, which is punishing for a workload that idles while waiting on the model.
+2. **Own egress proxy, or a platform whose egress policy is good enough?** Nothing in §8's control list comes free with any vendor, so the realistic answer is "own it" — but worth one afternoon confirming before building.
+3. **How many sandbox-hours in the free tier**, and does it renew? §8 argues non-renewing; the number wants a real cost model once (1) is settled.
+4. **Does the pooled trial need a card?** It is ~$1 of exposure per signup, which is cheap marketing until someone scripts 10,000 signups. Turnstile + email verification may be enough; revisit if abuse appears.
 5. What is the free tier *for*? If it exists to convert, the card-on-file data argues for making it tiny and gating the rest.
