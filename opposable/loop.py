@@ -218,7 +218,10 @@ class Agent:
                     )
                 )
                 if done:
-                    done_summary = observation
+                    # The observation the model keeps has the deliverable paths
+                    # appended; the result carries them as their own field, so
+                    # take the summary alone and don't say it twice.
+                    done_summary = call.args.get("summary") or observation
                     deliverables = call.args.get("deliverables", [])
 
             self.save_state()

@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ActionChip } from "./ActionChip";
+import { CompletionCard } from "./CompletionCard";
 import { ArrowDown, Compress } from "./Icons";
 import { cx } from "../lib/ui";
 import type { ChatItem } from "../lib/useSession";
@@ -8,11 +9,19 @@ type Props = {
   items: ChatItem[];
   activeStep?: number | null;
   onSelectStep?: (step: number) => void;
+  onOpenFile: (path: string) => void;
+  onOpenFiles: () => void;
 };
 
 const NEAR_BOTTOM_PX = 96;
 
-export function ChatStream({ items, activeStep, onSelectStep }: Props) {
+export function ChatStream({
+  items,
+  activeStep,
+  onSelectStep,
+  onOpenFile,
+  onOpenFiles,
+}: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(true);
 
@@ -85,6 +94,15 @@ export function ChatStream({ items, activeStep, onSelectStep }: Props) {
                     <Compress size={13} />
                     Compressed {item.evicted} observation{item.evicted === 1 ? "" : "s"} to disk
                   </p>
+                );
+              case "done":
+                return (
+                  <CompletionCard
+                    key={item.key}
+                    done={item.payload}
+                    onOpenFile={onOpenFile}
+                    onOpenFiles={onOpenFiles}
+                  />
                 );
               default:
                 return null;

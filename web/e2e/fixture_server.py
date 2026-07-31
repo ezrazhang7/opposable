@@ -185,7 +185,37 @@ def long_script(page_url: str) -> list[ModelTurn]:
     return turns
 
 
-SCRIPTS = {"demo": demo_script, "error": error_script, "long": long_script}
+CHART = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 160" width="320" height="160">
+  <rect width="320" height="160" fill="#faf9f7"/>
+  <polyline fill="none" stroke="#6d5df6" stroke-width="3"
+            points="20,130 70,110 120,86 170,64 220,52 270,30"/>
+  <line x1="20" y1="140" x2="300" y2="140" stroke="#d6d3d1" stroke-width="2"/>
+  <text x="20" y="24" font-family="sans-serif" font-size="13" fill="#1c1917">launches per decade</text>
+</svg>
+"""
+
+
+def chart_script(page_url: str) -> list[ModelTurn]:
+    """Produces an image deliverable, for the files drawer's image preview."""
+    return [
+        turn(ToolCall("g1", "plan_update", {"plan": "- [ ] draw the chart\n- [x] done"})),
+        turn(ToolCall("g2", "file_write", {"path": "chart.svg", "content": CHART})),
+        turn(
+            ToolCall(
+                "g3",
+                "task_complete",
+                {"summary": "Charted launches per decade.", "deliverables": ["chart.svg"]},
+            )
+        ),
+    ]
+
+
+SCRIPTS = {
+    "demo": demo_script,
+    "error": error_script,
+    "long": long_script,
+    "chart": chart_script,
+}
 
 
 class PacedProvider(ScriptedProvider):

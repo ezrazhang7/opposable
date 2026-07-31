@@ -290,6 +290,63 @@ const replay: Scene = async (browser) => {
   await dark.context().close();
 };
 
+/** Completion card, deliverable chips, and the files drawer. */
+const files: Scene = async (browser) => {
+  const task = await createTask(
+    "Research the Voyager program and write a briefing with sources.",
+  );
+  await waitForStatus(task.id, "complete");
+
+  for (const theme of ["light", "dark"] as Theme[]) {
+    const page = await openPage(browser, { theme });
+    await selectNewest(page);
+    const card = page.getByRole("region", { name: "Task complete" });
+    await card.waitFor({ timeout: 30_000 });
+    await shoot(page, `completion-card-${theme}`);
+
+    // A deliverable chip opens the drawer straight onto that file.
+    await card.getByRole("button", { name: "report.md", exact: true }).click();
+    const drawer = page.getByRole("dialog", { name: "Task files" });
+    await drawer.waitFor();
+    await drawer.getByText("Voyager Program — briefing").first().waitFor();
+    await shoot(page, `files-drawer-${theme}`);
+
+    await drawer.getByRole("checkbox", { name: "Show internal files" }).check();
+    await drawer.getByRole("button", { name: /^todo\.md/ }).first().click();
+    await page.waitForTimeout(250);
+    await shoot(page, `files-drawer-internal-${theme}`);
+
+    await page.keyboard.press("Escape");
+    await page.context().close();
+  }
+
+  // The download link serves the file the agent actually wrote.
+  const page = await openPage(browser, { theme: "light" });
+  await selectNewest(page);
+  await page
+    .getByRole("region", { name: "Task complete" })
+    .getByRole("button", { name: "notes.md", exact: true })
+    .click();
+  const download = page.waitForEvent("download");
+  await page.getByRole("link", { name: "Download" }).click();
+  const saved = await download;
+  console.log(`  downloaded: ${saved.suggestedFilename()}`);
+  await page.context().close();
+
+  // An image deliverable previews as an image, not as text.
+  const chart = await createTask("Chart launches per decade as an SVG.", "chart");
+  await waitForStatus(chart.id, "complete");
+  const withImage = await openPage(browser, { theme: "light" });
+  await selectNewest(withImage);
+  await withImage
+    .getByRole("region", { name: "Task complete" })
+    .getByRole("button", { name: "chart.svg", exact: true })
+    .click();
+  await withImage.getByRole("img", { name: "chart.svg" }).waitFor();
+  await shoot(withImage, "files-drawer-image");
+  await withImage.context().close();
+};
+
 export const scenes: Record<string, Scene> = {
   shell,
   sessions,
@@ -299,4 +356,5 @@ export const scenes: Record<string, Scene> = {
   renderers,
   plan,
   replay,
+  files,
 };

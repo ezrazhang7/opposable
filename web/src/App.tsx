@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ChatStream } from "./components/ChatStream";
 import { ComputerPanel } from "./components/ComputerPanel";
+import { FilesDrawer } from "./components/FilesDrawer";
 import { Home } from "./components/Home";
 import { IconButton } from "./components/IconButton";
 import { PanelRight } from "./components/Icons";
@@ -23,6 +24,8 @@ export default function App() {
   const [live, setLive] = useState(true);
   const [raw, setRaw] = useState(false);
   const [playing, setPlaying] = useState(false);
+  const [filesOpen, setFilesOpen] = useState(false);
+  const [previewPath, setPreviewPath] = useState<string | null>(null);
 
   const { tasks, error, refresh } = useTasks();
   const selected = tasks.find((t) => t.id === selectedId) ?? null;
@@ -34,7 +37,14 @@ export default function App() {
     setLive(true);
     setRaw(false);
     setPlaying(false);
+    setFilesOpen(false);
+    setPreviewPath(null);
   }, [selectedId]);
+
+  const openFile = (path: string) => {
+    setPreviewPath(path);
+    setFilesOpen(true);
+  };
 
   const newestStep = session.steps.length ? session.steps[session.steps.length - 1].step : null;
   const activeStep = live ? newestStep : pickedStep;
@@ -103,6 +113,11 @@ export default function App() {
               items={session.items}
               activeStep={activeStep}
               onSelectStep={selectStep}
+              onOpenFile={openFile}
+              onOpenFiles={() => {
+                setPreviewPath(null);
+                setFilesOpen(true);
+              }}
             />
           ) : (
             <div className="min-h-0 flex-1 overflow-y-auto">
@@ -132,6 +147,15 @@ export default function App() {
           />
         )}
       </main>
+
+      {filesOpen && selected && (
+        <FilesDrawer
+          taskId={selected.id}
+          deliverables={session.done?.deliverables ?? []}
+          initialPath={previewPath}
+          onClose={() => setFilesOpen(false)}
+        />
+      )}
     </div>
   );
 }
