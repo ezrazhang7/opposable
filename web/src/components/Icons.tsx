@@ -15,7 +15,8 @@ function Svg({ size = 16, children, ...rest }: P) {
       strokeWidth={1.75}
       strokeLinecap="round"
       strokeLinejoin="round"
-      aria-hidden="true"
+      // Decorative unless the caller gave it a name.
+      aria-hidden={rest["aria-label"] ? undefined : true}
       {...rest}
     >
       {children}

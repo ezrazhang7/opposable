@@ -1,6 +1,10 @@
+import { useMemo, useState } from "react";
 import { Logo, Moon, PanelLeft, Plus, Search, Settings, Sun } from "./Icons";
 import { IconButton } from "./IconButton";
+import { StatusIcon, STATUS_LABEL } from "./StatusIcon";
 import { cx } from "../lib/ui";
+import { relativeTime } from "../lib/time";
+import type { TaskMeta } from "../lib/api";
 import type { Theme } from "../lib/theme";
 
 type Props = {
@@ -8,11 +12,32 @@ type Props = {
   onToggleCollapse: () => void;
   theme: Theme;
   onToggleTheme: () => void;
+  tasks: TaskMeta[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  onNewTask: () => void;
+  onOpenSettings?: () => void;
 };
 
-/** Left rail: identity, new-task, filter, session list, and the two global
- *  toggles pinned to the bottom. Sessions arrive in step 3. */
-export function Sidebar({ collapsed, onToggleCollapse, theme, onToggleTheme }: Props) {
+export function Sidebar({
+  collapsed,
+  onToggleCollapse,
+  theme,
+  onToggleTheme,
+  tasks,
+  selectedId,
+  onSelect,
+  onNewTask,
+  onOpenSettings,
+}: Props) {
+  const [query, setQuery] = useState("");
+
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return tasks;
+    return tasks.filter((t) => (t.title + " " + t.task).toLowerCase().includes(q));
+  }, [tasks, query]);
+
   return (
     <nav
       aria-label="Sessions"
@@ -21,12 +46,7 @@ export function Sidebar({ collapsed, onToggleCollapse, theme, onToggleTheme }: P
         collapsed ? "w-14" : "w-[260px]",
       )}
     >
-      <div
-        className={cx(
-          "flex h-14 items-center gap-2 px-3",
-          collapsed && "justify-center px-0",
-        )}
-      >
+      <div className={cx("flex h-14 items-center gap-2 px-3", collapsed && "justify-center px-0")}>
         <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-accent-soft text-accent">
           <Logo size={18} />
         </span>
@@ -45,12 +65,13 @@ export function Sidebar({ collapsed, onToggleCollapse, theme, onToggleTheme }: P
       <div className={cx("px-3 pb-3", collapsed && "px-2")}>
         <button
           type="button"
+          onClick={onNewTask}
+          title="New task"
           className={cx(
             "flex h-9 w-full items-center gap-2 rounded-xl bg-accent px-3 text-[13px] font-medium text-accent-fg",
             "transition-colors hover:bg-accent-hover focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-panel focus-visible:outline-none",
             collapsed && "justify-center px-0",
           )}
-          title="New task"
         >
           <Plus />
           {!collapsed && <span>New task</span>}
@@ -63,18 +84,56 @@ export function Sidebar({ collapsed, onToggleCollapse, theme, onToggleTheme }: P
             <Search className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-faint" />
             <input
               type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
               placeholder="Search tasks"
+              aria-label="Search tasks"
               className="h-8 w-full rounded-xl border border-line bg-bg pr-2 pl-8 text-[13px] placeholder:text-faint focus:border-accent focus:outline-none"
             />
           </div>
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-2">
-        {!collapsed && (
-          <p className="px-1 py-6 text-center text-[13px] text-faint">No tasks yet.</p>
+      <ul
+        className={cx(
+          "min-h-0 flex-1 space-y-0.5 overflow-y-auto pb-2",
+          collapsed ? "flex flex-col items-center px-2" : "px-3",
         )}
-      </div>
+      >
+        {visible.map((task) => (
+          <li key={task.id} className={collapsed ? "" : "w-full"}>
+            <button
+              type="button"
+              onClick={() => onSelect(task.id)}
+              aria-current={task.id === selectedId ? "true" : undefined}
+              title={collapsed ? `${task.title} — ${STATUS_LABEL[task.status]}` : undefined}
+              className={cx(
+                "flex items-center rounded-xl text-left transition-colors",
+                "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
+                collapsed
+                  ? "h-9 w-9 justify-center"
+                  : "w-full gap-2.5 px-2.5 py-2",
+                task.id === selectedId ? "bg-raised" : "hover:bg-raised/70",
+              )}
+            >
+              <StatusIcon status={task.status} />
+              {!collapsed && (
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[13px] leading-tight">{task.title}</span>
+                  <span className="block truncate text-[11px] text-faint">
+                    {relativeTime(task.created)}
+                  </span>
+                </span>
+              )}
+            </button>
+          </li>
+        ))}
+        {!collapsed && visible.length === 0 && (
+          <li className="px-1 py-6 text-center text-[13px] text-faint">
+            {tasks.length === 0 ? "No tasks yet." : "No matches."}
+          </li>
+        )}
+      </ul>
 
       <div
         className={cx(
@@ -93,7 +152,7 @@ export function Sidebar({ collapsed, onToggleCollapse, theme, onToggleTheme }: P
         >
           {theme === "dark" ? <Sun /> : <Moon />}
         </IconButton>
-        <IconButton label="Settings">
+        <IconButton label="Settings" onClick={onOpenSettings}>
           <Settings />
         </IconButton>
       </div>

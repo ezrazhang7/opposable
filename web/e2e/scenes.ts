@@ -2,6 +2,7 @@
  *  drives the real UI and writes PNGs to e2e/shots/ for review before commit. */
 import type { Browser } from "playwright";
 import { openPage, shoot, VIEWPORTS, type Theme } from "./shoot";
+import { createTask, stopTask, waitForEvents, waitForStatus } from "./tasks";
 
 export type Scene = (browser: Browser) => Promise<void>;
 
@@ -24,4 +25,39 @@ const shell: Scene = async (browser) => {
   await laptop.context().close();
 };
 
-export const scenes: Record<string, Scene> = { shell };
+/** Three sessions in three different states, so the rail shows every icon. */
+const sessions: Scene = async (browser) => {
+  const done = await createTask(
+    "Research the Voyager program and write a briefing with sources.",
+  );
+  await waitForStatus(done.id, "complete");
+
+  const halted = await createTask("Crawl the archive index and summarise it.", "long");
+  await waitForEvents(halted.id, 4);
+  await stopTask(halted.id);
+  await waitForStatus(halted.id, "stopped");
+
+  const live = await createTask("Build a small dataset of launch dates.", "long");
+  await waitForEvents(live.id, 3);
+
+  for (const theme of ["light", "dark"] as Theme[]) {
+    const page = await openPage(browser, { theme });
+    await page.getByRole("button", { name: /Research the Voyager/ }).click();
+    await shoot(page, `sessions-${theme}`);
+    await page.context().close();
+  }
+
+  const collapsed = await openPage(browser, { theme: "light" });
+  await collapsed.getByRole("button", { name: "Collapse sidebar" }).click();
+  await collapsed.waitForTimeout(300);
+  await shoot(collapsed, "sessions-collapsed");
+  await collapsed.context().close();
+
+  const filtered = await openPage(browser, { theme: "light" });
+  await filtered.getByLabel("Search tasks").fill("launch");
+  await filtered.waitForTimeout(150);
+  await shoot(filtered, "sessions-search");
+  await filtered.context().close();
+};
+
+export const scenes: Record<string, Scene> = { shell, sessions };
