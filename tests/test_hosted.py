@@ -5,6 +5,7 @@ account would try. They are not "does the feature work" tests — they are the
 exit criterion for opening the door, so a failure here blocks a deploy.
 """
 
+import json
 import os
 import sys
 import uuid
@@ -16,6 +17,7 @@ import pytest
 
 from opposable import config
 from opposable.sandbox import SANDBOX_ENV_ALLOWLIST, LocalSandbox, sandbox_env
+from opposable.server import _check_params
 
 from .test_server import SCRIPT, request, start_server
 
@@ -80,15 +82,13 @@ def test_hosted_allows_only_allowlisted_base_urls(tmp_path, hosted, monkeypatch)
     httpd, port = start_server(tmp_path, SCRIPT)
     status, _ = request(
         port, "POST", "/api/tasks",
-        {"task": "x" * 100, "base_url": "https://api.openai.com/v1"},
-    )
-    assert status == 201
-    status, _ = request(
-        port, "POST", "/api/tasks",
         {"task": "x" * 100, "base_url": "https://api.openai.com.evil.example/v1"},
     )
     assert status == 400
     httpd.shutdown()
+    # The accepted case is asserted against the validator directly: in hosted
+    # mode a create still stops at the sandbox check below, which is the point.
+    _check_params({"base_url": "https://api.openai.com/v1"})
 
 
 def test_hosted_refuses_unlisted_model_and_image(tmp_path, hosted):
@@ -99,9 +99,8 @@ def test_hosted_refuses_unlisted_model_and_image(tmp_path, hosted):
         port, "POST", "/api/tasks", {"task": "x" * 100, "image": "attacker/backdoor:latest"}
     )
     assert status == 400 and "image" in body["error"]
-    status, _ = request(port, "POST", "/api/tasks", {"task": "x" * 100, "model": "claude-sonnet-5"})
-    assert status == 201
     httpd.shutdown()
+    _check_params({"model": "claude-sonnet-5", "image": "ubuntu:24.04"})
 
 
 # ------------------------------------------------------- 0b: sandbox confinement
@@ -151,6 +150,86 @@ def test_tool_errors_keep_the_wrong_stuff_in(tmp_path):
     runtime = ToolRuntime(LocalSandbox(root=tmp_path / "ws"))
     observation, done = runtime.execute("file_read", {"path": "../../etc/passwd"})
     assert not done and "TOOL ERROR" in observation and "escapes the sandbox" in observation
+
+
+# --------------------------------------------------------- 0b: lifecycle seam
+
+
+def test_archive_round_trips_the_workdir(tmp_path):
+    src = LocalSandbox(root=tmp_path / "a")
+    src.write_file("report.md", "findings")
+    src.write_file("nested/data.json", "{}")
+    archive = src.archive(tmp_path / "archives" / "task.tar.gz")
+
+    dst = LocalSandbox(root=tmp_path / "b")
+    dst.restore(archive)
+    assert dst.read_file("report.md") == "findings"
+    assert dst.read_file("nested/data.json") == "{}"
+
+
+def test_archive_skips_reconstructible_directories(tmp_path):
+    """node_modules and friends are 10-100x the archive and rebuildable."""
+    sandbox = LocalSandbox(root=tmp_path / "ws")
+    sandbox.write_file("keep.txt", "yes")
+    sandbox.write_file("node_modules/left-pad/index.js", "x" * 5000)
+    sandbox.write_file(".venv/lib/site-packages/thing.py", "y" * 5000)
+    sandbox.write_file("src/__pycache__/mod.cpython-314.pyc", "z" * 5000)
+    archive = sandbox.archive(tmp_path / "task.tar.gz")
+
+    import tarfile
+
+    with tarfile.open(archive) as tar:
+        names = tar.getnames()
+    assert "keep.txt" in names
+    assert not [n for n in names if "node_modules" in n or ".venv" in n or "__pycache__" in n]
+
+
+def test_manifest_describes_the_box(tmp_path):
+    sandbox = LocalSandbox(root=tmp_path / "ws")
+    assert sandbox.manifest()["kind"] == "local"
+    assert sandbox.snapshot() is None, "no native fast path must report None, not lie"
+
+
+def test_task_records_an_immutable_manifest(tmp_path):
+    httpd, port = start_server(tmp_path, SCRIPT)
+    _, meta = request(port, "POST", "/api/tasks", {"task": "x" * 100})
+    manifest = json.loads(
+        (tmp_path / f".opposable-{meta['id']}" / ".opposable" / "state" / "manifest.json")
+        .read_text(encoding="utf-8")
+    )
+    assert manifest["kind"] == "local" and "created" in manifest
+    httpd.shutdown()
+
+
+# ------------------------------------------------- 0b: hosted refuses dev boxes
+
+
+def test_hosted_refuses_development_sandboxes(tmp_path, hosted):
+    httpd, port = start_server(tmp_path, SCRIPT)
+    for kind in ("docker", "local"):
+        status, body = request(port, "POST", "/api/tasks", {"task": "x" * 100, "sandbox": kind})
+        assert status == 400 and "development-only" in body["error"]
+    # ...including the default, so hosted mode cannot run a task at all until
+    # a microVM backend exists.
+    status, body = request(port, "POST", "/api/tasks", {"task": "x" * 100})
+    assert status == 400 and "development-only" in body["error"]
+    httpd.shutdown()
+
+
+def test_hosted_preflight_refuses_to_start_unconfigured(hosted, monkeypatch):
+    from opposable.server import serve
+
+    problems = config.preflight()
+    assert any("OPPOSABLE_SANDBOX_BACKEND" in p for p in problems)
+    with pytest.raises(config.PreflightError, match="refusing to start"):
+        serve(port=0)
+
+    monkeypatch.setenv("OPPOSABLE_SANDBOX_BACKEND", "local")
+    assert any("development-only" in p for p in config.preflight())
+
+
+def test_local_preflight_is_silent():
+    assert config.preflight() == []
 
 
 def test_local_mode_still_trusts_its_operator(tmp_path):

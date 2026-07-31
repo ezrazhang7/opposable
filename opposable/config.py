@@ -56,8 +56,54 @@ def allowed_base_urls() -> tuple[str, ...]:
     return _list("OPPOSABLE_ALLOWED_BASE_URLS")
 
 
+#: Backends that share a kernel (or a whole machine) with the host. Fine for
+#: the operator's own laptop, disqualifying the moment a stranger submits the
+#: prompt — escaping a container means one kernel bug, escaping a microVM
+#: means breaking virtualization (HOSTED_PRD §4).
+DEV_SANDBOX_BACKENDS = ("local", "docker")
+
+
+def sandbox_backend() -> str:
+    """The backend hosted mode will actually run. Empty until a microVM
+    vendor is chosen and ``OPPOSABLE_SANDBOX_BACKEND`` names it."""
+    return os.environ.get("OPPOSABLE_SANDBOX_BACKEND", "").strip()
+
+
 class ConfigError(ValueError):
     """A client-supplied parameter is not on the allowlist."""
+
+
+class PreflightError(RuntimeError):
+    """Hosted mode is misconfigured. Refuse to start rather than serve the
+    internet with a ship-blocker unaddressed."""
+
+
+def check_sandbox(kind: str) -> None:
+    """Refuse a development sandbox backend in hosted mode."""
+    if hosted() and kind in DEV_SANDBOX_BACKENDS:
+        raise ConfigError(
+            f"the {kind} sandbox is development-only; hosted mode requires a "
+            f"microVM backend (set OPPOSABLE_SANDBOX_BACKEND)"
+        )
+
+
+def preflight() -> list[str]:
+    """Everything that must be true before this process faces the internet.
+
+    Returns the list of problems; :func:`serve` turns a non-empty list into a
+    refusal to start. Grouped by the HOSTED_PRD §10 task that owns each.
+    """
+    if not hosted():
+        return []
+    problems: list[str] = []
+    backend = sandbox_backend()
+    if not backend:
+        problems.append(
+            "0b: OPPOSABLE_SANDBOX_BACKEND is unset — no microVM backend is configured"
+        )
+    elif backend in DEV_SANDBOX_BACKENDS:
+        problems.append(f"0b: OPPOSABLE_SANDBOX_BACKEND={backend} is development-only")
+    return problems
 
 
 def check_param(name: str, value: str | None, allowed: tuple[str, ...]) -> str | None:

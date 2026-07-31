@@ -146,10 +146,20 @@ class TaskManager:
 
     def _build_agent(self, handle: TaskHandle) -> Agent:
         params = handle.params
-        if params.get("sandbox") == "docker":
+        kind = params.get("sandbox") or "local"
+        config.check_sandbox(kind)
+        if kind == "docker":
             sandbox = DockerSandbox(image=params.get("image", "ubuntu:24.04"))
         else:
             sandbox = LocalSandbox(root=handle.workdir)
+        # Immutable per-task manifest: restoring means "the same box again",
+        # not "whatever the default happens to be by then" (HOSTED_PRD §4).
+        manifest_path = handle.state_dir / "manifest.json"
+        if not manifest_path.exists():
+            manifest_path.write_text(
+                json.dumps({**sandbox.manifest(), "created": handle.created}, sort_keys=True),
+                encoding="utf-8",
+            )
         return Agent(
             provider=self.provider_factory(params),
             sandbox=sandbox,
@@ -358,6 +368,9 @@ class Handler(BaseHTTPRequestHandler):
             }
             try:
                 _check_params(params)
+                # A 400 rather than a 500 from deep inside the worker: asking
+                # for a development backend in hosted mode is a bad request.
+                config.check_sandbox(params.get("sandbox") or "local")
             except config.ConfigError as exc:
                 return self._error(400, str(exc))
             try:
@@ -512,5 +525,10 @@ class OpposableServer(ThreadingHTTPServer):
 
 
 def serve(port: int = 8734, base_dir: str | None = None, provider_factory=None) -> OpposableServer:
+    problems = config.preflight()
+    if problems:
+        raise config.PreflightError(
+            "refusing to start in hosted mode:\n  - " + "\n  - ".join(problems)
+        )
     manager = TaskManager(base_dir=base_dir, provider_factory=provider_factory)
     return OpposableServer(("127.0.0.1", port), manager)

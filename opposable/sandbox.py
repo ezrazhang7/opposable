@@ -22,6 +22,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import tarfile
 import uuid
 from functools import lru_cache
 from pathlib import Path
@@ -67,9 +68,36 @@ def _bash_path() -> str:
     return "bash"
 
 
-class Sandbox:
-    """Interface. A sandbox is a place to run shells and keep files."""
+# Reconstructible, and usually 10-100x the size of everything worth keeping.
+# Archiving them is how a 200 KB task becomes a 400 MB one (HOSTED_PRD §4).
+ARCHIVE_EXCLUDES = (
+    "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", ".cache", ".npm", ".tox", ".gradle",
+    "target", ".next", ".parcel-cache",
+)
 
+
+def _is_excluded(rel_posix: str) -> bool:
+    return any(part in ARCHIVE_EXCLUDES for part in rel_posix.split("/"))
+
+
+class Sandbox:
+    """Interface. A sandbox is a place to run shells and keep files.
+
+    The lifecycle half of this interface exists so the hosted backend is a
+    swap rather than a rewrite. HOSTED_PRD §4:
+
+        running -> idle (5-15 min) -> paused -> archived (7 d) -> deleted (30 d)
+
+    ``pause``/``resume``/``snapshot`` are the *fast path*, and every backend
+    implements them differently or not at all. ``archive``/``restore`` are the
+    *portable* path: a tarball plus the manifest reconstitutes a task on any
+    backend, which is what keeps the vendor choice reversible and what covers
+    the vendors whose snapshots are known to stop restoring after repeated
+    resumes.
+    """
+
+    kind = "base"
     workdir: str
 
     def exec(self, command: str, timeout: int = 120) -> tuple[int, str, str]:
@@ -81,11 +109,42 @@ class Sandbox:
     def read_file(self, path: str) -> str:
         raise NotImplementedError
 
+    # -------------------------------------------------------------- lifecycle
+
+    def pause(self) -> None:
+        """Stop consuming compute, keep state. Idempotent."""
+
+    def resume(self) -> None:
+        """Undo :meth:`pause`. Idempotent."""
+
+    def snapshot(self) -> str | None:
+        """Native checkpoint, returning an opaque handle.
+
+        ``None`` means the backend has no fast path — callers must fall back
+        to :meth:`archive`, never assume the state was captured.
+        """
+        return None
+
+    def archive(self, dest: str | Path) -> Path:
+        """Write a portable gzipped tar of the workdir to ``dest``."""
+        raise NotImplementedError
+
+    def restore(self, src: str | Path) -> None:
+        """Extract an :meth:`archive` back into the workdir."""
+        raise NotImplementedError
+
+    def manifest(self) -> dict:
+        """Immutable description of what this sandbox is, so restoring means
+        "the same box again" rather than "whatever the default is today"."""
+        return {"kind": self.kind, "workdir": self.workdir}
+
     def close(self) -> None:  # pragma: no cover - trivial
         pass
 
 
 class LocalSandbox(Sandbox):
+    kind = "local"
+
     def __init__(self, root: str | None = None):
         self.root = Path(root or Path.cwd() / f".opposable-{uuid.uuid4().hex[:8]}")
         self.root.mkdir(parents=True, exist_ok=True)
@@ -137,6 +196,33 @@ class LocalSandbox(Sandbox):
 
     def read_file(self, path: str) -> str:
         return self._resolve(path).read_text(encoding="utf-8")
+
+    # There is nothing to pause: the processes are the host's. Left as the
+    # inherited no-ops rather than faked, so callers cannot mistake a local
+    # sandbox for one that releases compute.
+
+    def archive(self, dest: str | Path) -> Path:
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        root = self.root.resolve()
+        with tarfile.open(dest, "w:gz") as tar:
+            for path in sorted(root.rglob("*")):
+                rel = path.relative_to(root).as_posix()
+                if _is_excluded(rel) or not path.is_file() or path.is_symlink():
+                    continue
+                tar.add(path, arcname=rel)
+        return dest
+
+    def restore(self, src: str | Path) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(src, "r:gz") as tar:
+            try:
+                tar.extractall(self.root, filter="data")
+            except TypeError:  # pragma: no cover - Python < 3.12
+                tar.extractall(self.root)
+
+    def manifest(self) -> dict:
+        return {**super().manifest(), "root": str(self.root)}
 
 
 #: Resource ceilings from HOSTED_PRD §4 — values, not vibes. ``memory-swap``
@@ -286,6 +372,56 @@ class DockerSandbox(Sandbox):
         if code != 0:
             raise FileNotFoundError(err.strip())
         return out
+
+    # -------------------------------------------------------------- lifecycle
+
+    def pause(self) -> None:
+        subprocess.run(["docker", "pause", self.name], capture_output=True)
+
+    def resume(self) -> None:
+        subprocess.run(["docker", "unpause", self.name], capture_output=True)
+
+    def snapshot(self) -> str | None:
+        """``docker commit`` — the fast path. It captures the container
+        filesystem but **not** the volume, so it is an optimisation on top of
+        :meth:`archive`, never a replacement for it."""
+        proc = subprocess.run(
+            ["docker", "commit", self.name], capture_output=True, encoding="utf-8"
+        )
+        return proc.stdout.strip() or None if proc.returncode == 0 else None
+
+    def archive(self, dest: str | Path) -> Path:
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        excludes = [f"--exclude=./{name}" for name in ARCHIVE_EXCLUDES]
+        with dest.open("wb") as out:
+            proc = subprocess.run(
+                ["docker", "exec", self.name, "tar", "czf", "-", *excludes, "-C", self.workdir, "."],
+                stdout=out,
+                stderr=subprocess.PIPE,
+            )
+        if proc.returncode != 0:
+            raise OSError(f"archive failed: {proc.stderr.decode('utf-8', 'replace').strip()}")
+        return dest
+
+    def restore(self, src: str | Path) -> None:
+        with Path(src).open("rb") as f:
+            proc = subprocess.run(
+                ["docker", "exec", "-i", self.name, "tar", "xzf", "-", "-C", self.workdir],
+                stdin=f,
+                capture_output=True,
+            )
+        if proc.returncode != 0:
+            raise OSError(f"restore failed: {proc.stderr.decode('utf-8', 'replace').strip()}")
+
+    def manifest(self) -> dict:
+        return {
+            **super().manifest(),
+            "image": self.image,
+            "profile": self.profile,
+            "network": self.network or "default",
+            "volume": self.volume,
+        }
 
     def close(self) -> None:
         subprocess.run(["docker", "rm", "-f", self.name], capture_output=True)
