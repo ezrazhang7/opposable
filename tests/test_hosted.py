@@ -7,6 +7,7 @@ exit criterion for opening the door, so a failure here blocks a deploy.
 
 import os
 import sys
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -101,6 +102,55 @@ def test_hosted_refuses_unlisted_model_and_image(tmp_path, hosted):
     status, _ = request(port, "POST", "/api/tasks", {"task": "x" * 100, "model": "claude-sonnet-5"})
     assert status == 201
     httpd.shutdown()
+
+
+# ------------------------------------------------------- 0b: sandbox confinement
+
+
+def test_absolute_paths_land_inside_the_sandbox(tmp_path):
+    """A model writing /sandbox/report.md used to create C:\\sandbox\\report.md
+    on the host — outside the sandbox root entirely."""
+    root = tmp_path / "ws"
+    sandbox = LocalSandbox(root=root)
+    # Unique, because the old behaviour left real files at the drive root and
+    # a fixed name would assert against someone else's litter.
+    escapee = f"/sandbox/{uuid.uuid4().hex}.md"
+    written = sandbox.write_file(escapee, "hello")
+    assert Path(written).resolve().is_relative_to(root.resolve())
+    assert sandbox.read_file(escapee) == "hello"
+    assert not (Path(root.anchor) / escapee.lstrip("/")).exists()
+
+
+def test_traversal_out_of_the_sandbox_is_refused(tmp_path):
+    sandbox = LocalSandbox(root=tmp_path / "ws")
+    (tmp_path / "outside.txt").write_text("secret", encoding="utf-8")
+    with pytest.raises(ValueError, match="escapes the sandbox"):
+        sandbox.read_file("../outside.txt")
+    with pytest.raises(ValueError, match="escapes the sandbox"):
+        sandbox.write_file("../../pwned.txt", "x")
+
+
+def test_symlink_out_of_the_sandbox_is_refused(tmp_path):
+    """Resolution follows links, so one planted inside cannot point out."""
+    root = tmp_path / "ws"
+    sandbox = LocalSandbox(root=root)
+    (tmp_path / "outside.txt").write_text("secret", encoding="utf-8")
+    try:
+        (root / "link.txt").symlink_to(tmp_path / "outside.txt")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this host")
+    with pytest.raises(ValueError, match="escapes the sandbox"):
+        sandbox.read_file("link.txt")
+
+
+def test_tool_errors_keep_the_wrong_stuff_in(tmp_path):
+    """A refused path surfaces to the model as an observation, not a crash —
+    principle 5 still holds for the new boundary."""
+    from opposable.tools import ToolRuntime
+
+    runtime = ToolRuntime(LocalSandbox(root=tmp_path / "ws"))
+    observation, done = runtime.execute("file_read", {"path": "../../etc/passwd"})
+    assert not done and "TOOL ERROR" in observation and "escapes the sandbox" in observation
 
 
 def test_local_mode_still_trusts_its_operator(tmp_path):
