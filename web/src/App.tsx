@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChatStream } from "./components/ChatStream";
 import { ComputerPanel } from "./components/ComputerPanel";
 import { Home } from "./components/Home";
@@ -19,9 +19,29 @@ export default function App() {
   const [panelOpen, setPanelOpen] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
+  const [pickedStep, setPickedStep] = useState<number | null>(null);
+  const [live, setLive] = useState(true);
+  const [raw, setRaw] = useState(false);
+
   const { tasks, error, refresh } = useTasks();
   const selected = tasks.find((t) => t.id === selectedId) ?? null;
   const session = useSession(selected);
+
+  // A different task means a different timeline: follow its newest step.
+  useEffect(() => {
+    setPickedStep(null);
+    setLive(true);
+    setRaw(false);
+  }, [selectedId]);
+
+  const newestStep = session.steps.length ? session.steps[session.steps.length - 1].step : null;
+  const activeStep = live ? newestStep : pickedStep;
+  const shownStep = session.steps.find((s) => s.step === activeStep) ?? null;
+
+  const selectStep = (step: number) => {
+    setPickedStep(step);
+    setLive(false);
+  };
 
   const startTask = async (task: string) => {
     const created = await api.createTask({ task, ...taskParams(settings) });
@@ -77,7 +97,11 @@ export default function App() {
           )}
 
           {selected ? (
-            <ChatStream items={session.items} />
+            <ChatStream
+              items={session.items}
+              activeStep={activeStep}
+              onSelectStep={selectStep}
+            />
           ) : (
             <div className="min-h-0 flex-1 overflow-y-auto">
               <Home settings={settings} onUpdateSettings={updateSettings} onStart={startTask} />
@@ -85,7 +109,16 @@ export default function App() {
           )}
         </section>
 
-        {panelOpen && <ComputerPanel onClose={() => setPanelOpen(false)} />}
+        {panelOpen && (
+          <ComputerPanel
+            step={shownStep}
+            live={live}
+            onGoLive={() => setLive(true)}
+            onClose={() => setPanelOpen(false)}
+            raw={raw}
+            onToggleRaw={() => setRaw((v) => !v)}
+          />
+        )}
       </main>
     </div>
   );

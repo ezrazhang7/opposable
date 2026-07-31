@@ -144,4 +144,39 @@ const chat: Scene = async (browser) => {
   await cramped.context().close();
 };
 
-export const scenes: Record<string, Scene> = { shell, sessions, home, chat };
+/** The computer panel following a live shell_exec, then pinned to a step. */
+const terminal: Scene = async (browser) => {
+  const long = await createTask("Crawl the archive index and summarise it.", "long");
+  const page = await openPage(browser, { theme: "light" });
+  await selectNewest(page);
+  const panel = page.getByRole("complementary", { name: "opposable's computer" });
+  await panel.getByText("exit 0").waitFor({ timeout: 30_000 });
+  await shoot(page, "terminal-live");
+
+  // Clicking a chip pins the panel to that step and drops out of live follow.
+  await page.getByRole("button", { name: /Executing command echo step 1 / }).click();
+  await panel.getByText("step 1 of a long crawl").first().waitFor();
+  await shoot(page, "terminal-pinned");
+
+  await page.getByRole("button", { name: "Raw", exact: true }).click();
+  await page.waitForTimeout(200);
+  await shoot(page, "terminal-raw");
+
+  await page.getByRole("button", { name: "Raw", exact: true }).click();
+  await page.getByRole("button", { name: "Live", exact: true }).click();
+  await page.waitForTimeout(400);
+  await shoot(page, "terminal-back-to-live");
+  await stopTask(long.id);
+  await page.context().close();
+
+  const dark = await openPage(browser, { theme: "dark" });
+  await selectNewest(dark);
+  await dark
+    .getByRole("complementary", { name: "opposable's computer" })
+    .getByText("exit 0")
+    .waitFor({ timeout: 30_000 });
+  await shoot(dark, "terminal-dark");
+  await dark.context().close();
+};
+
+export const scenes: Record<string, Scene> = { shell, sessions, home, chat, terminal };

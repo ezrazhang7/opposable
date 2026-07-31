@@ -70,6 +70,27 @@ export function truncate(text: string, max = 80): string {
   return flat.length > max ? flat.slice(0, max - 1) + "…" : flat;
 }
 
+/** Split a shell observation back into its three parts. The runtime formats
+ *  it as `exit_code: N\nstdout:\n…\nstderr:\n…`; stdout may itself contain the
+ *  word "stderr:", so the tail is found from the end. */
+export function parseShell(observation: string): {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+} {
+  const code = exitCode(observation);
+  const outAt = observation.indexOf("\nstdout:\n");
+  if (outAt === -1) return { code, stdout: observation, stderr: "" };
+  const rest = observation.slice(outAt + "\nstdout:\n".length);
+  const errAt = rest.lastIndexOf("\nstderr:\n");
+  if (errAt === -1) return { code, stdout: rest, stderr: "" };
+  return {
+    code,
+    stdout: rest.slice(0, errAt),
+    stderr: rest.slice(errAt + "\nstderr:\n".length),
+  };
+}
+
 /** shell_exec reports the exit code in the first line of its observation. */
 export function exitCode(observation: string): number | null {
   const m = /^exit_code:\s*(-?\d+)/.exec(observation);
