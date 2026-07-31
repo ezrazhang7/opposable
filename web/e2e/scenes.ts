@@ -60,4 +60,31 @@ const sessions: Scene = async (browser) => {
   await filtered.context().close();
 };
 
-export const scenes: Record<string, Scene> = { shell, sessions };
+/** Home screen, and the round trip from typing a task to it existing. */
+const home: Scene = async (browser) => {
+  for (const theme of ["light", "dark"] as Theme[]) {
+    const page = await openPage(browser, { theme });
+    await shoot(page, `home-${theme}`);
+    await page.getByRole("tab", { name: "Code" }).click();
+    await page.waitForTimeout(150);
+    await shoot(page, `home-${theme}-code-tab`);
+    await page.context().close();
+  }
+
+  const page = await openPage(browser, { theme: "light" });
+  const prompt = "Write a haiku about opposable thumbs and save it to haiku.txt.";
+  await page.getByRole("textbox").first().fill(prompt);
+  await shoot(page, "home-typed");
+  await page.keyboard.press("Enter");
+
+  // Submitting selects the new task: it shows in the header and the rail.
+  await page.getByRole("heading", { level: 1 }).waitFor({ state: "detached" });
+  await page
+    .getByRole("button", { name: /Working Write a haiku/ })
+    .first()
+    .waitFor();
+  await shoot(page, "home-submitted");
+  await page.context().close();
+};
+
+export const scenes: Record<string, Scene> = { shell, sessions, home };

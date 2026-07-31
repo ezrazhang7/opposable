@@ -1,20 +1,30 @@
 import { useState } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { ComputerPanel } from "./components/ComputerPanel";
+import { Home } from "./components/Home";
 import { IconButton } from "./components/IconButton";
 import { PanelRight } from "./components/Icons";
 import { StatusIcon, STATUS_LABEL } from "./components/StatusIcon";
+import { api } from "./lib/api";
+import { taskParams, useSettings } from "./lib/settings";
 import { useTheme } from "./lib/theme";
 import { useTasks } from "./lib/useTasks";
 
 export default function App() {
   const [theme, toggleTheme] = useTheme();
+  const [settings, updateSettings] = useSettings();
   const [railCollapsed, setRailCollapsed] = useState(false);
   const [panelOpen, setPanelOpen] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  const { tasks, error } = useTasks();
+  const { tasks, error, refresh } = useTasks();
   const selected = tasks.find((t) => t.id === selectedId) ?? null;
+
+  const startTask = async (task: string) => {
+    const created = await api.createTask({ task, ...taskParams(settings) });
+    setSelectedId(created.id);
+    await refresh();
+  };
 
   return (
     <div className="flex h-full overflow-hidden bg-bg text-fg">
@@ -60,6 +70,13 @@ export default function App() {
               <p className="m-4 rounded-xl border border-line bg-err-soft px-3 py-2 text-[13px] text-err">
                 Cannot reach the opposable server: {error}
               </p>
+            )}
+            {!selected && (
+              <Home
+                settings={settings}
+                onUpdateSettings={updateSettings}
+                onStart={startTask}
+              />
             )}
           </div>
         </section>
