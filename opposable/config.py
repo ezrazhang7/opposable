@@ -104,6 +104,35 @@ def file_signing_key() -> bytes:
 #: leaked Referer is stale before anyone acts on it.
 FILE_URL_TTL_SECONDS = 300
 
+#: The pooled trial: enough to feel the product before being asked for a key,
+#: small enough to treat as marketing spend. "Go make an API key and paste it"
+#: kills casual signups harder than any card prompt (HOSTED_PRD §8).
+TRIAL_TASKS = 3
+TRIAL_MICROS = 1_000_000  # ~$1.00, in millionths of a dollar
+
+#: Per-Mtok input/output prices, in micros. Used to charge the trial and to
+#: show a burn-down. **Verify against live pricing before any of this reaches
+#: a pricing page** — HOSTED_PRD flags these as needing confirmation.
+MODEL_PRICES_MICROS = {
+    "claude-opus-5": (5_000_000, 25_000_000),
+    "claude-sonnet-5": (3_000_000, 15_000_000),
+    "claude-sonnet-4-6": (3_000_000, 15_000_000),
+    "claude-haiku-4-5-20251001": (1_000_000, 5_000_000),
+}
+DEFAULT_PRICE_MICROS = (3_000_000, 15_000_000)
+
+
+def estimate_micros(model: str | None, usage: dict) -> int:
+    """Rough cost of one run. Cached reads are billed at ~0.1x, which is the
+    whole point of the byte-stable prompt, so they are counted that way."""
+    price_in, price_out = MODEL_PRICES_MICROS.get(model or "", DEFAULT_PRICE_MICROS)
+    fresh = usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0
+    cache_read = usage.get("cache_read_input_tokens", 0) or 0
+    cache_write = usage.get("cache_creation_input_tokens", 0) or 0
+    out = usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0
+    billable_in = fresh + cache_write * 1.25 + cache_read * 0.1
+    return int((billable_in * price_in + out * price_out) / 1_000_000)
+
 
 def sandbox_backend() -> str:
     """The backend hosted mode will actually run. Empty until a microVM
@@ -169,6 +198,11 @@ def preflight() -> list[str]:
         problems.append("0d: OPPOSABLE_FILES_ORIGIN shares a registrable domain with the app")
     if len(file_signing_key()) < 32:
         problems.append("0d: OPPOSABLE_FILE_SIGNING_KEY is missing or shorter than 32 bytes")
+    if (os.environ.get("OPPOSABLE_SECRET_STORE", "").strip() or "local-file") == "local-file":
+        problems.append(
+            "0e: OPPOSABLE_SECRET_STORE is the local file store — other people's "
+            "provider keys must live in a secret manager"
+        )
     if not terms_version():
         problems.append("0g: OPPOSABLE_TERMS_VERSION is unset — acceptance cannot be recorded")
     if not os.environ.get("OPPOSABLE_TURNSTILE_SECRET", "").strip():

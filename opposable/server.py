@@ -36,7 +36,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
-from . import auth, config
+from . import auth, config, secrets_store
 from .auth import Identity
 from .loop import Agent, RunResult
 from .providers import AnthropicProvider, OpenAICompatProvider, Provider
@@ -137,9 +137,12 @@ def _check_params(params: dict) -> None:
 def default_provider_factory(params: dict) -> Provider:
     model = params.get("model") or os.environ.get("OPPOSABLE_MODEL", "claude-sonnet-4-6")
     base_url = params.get("base_url") or os.environ.get("OPPOSABLE_BASE_URL")
+    # Resolved by the manager from the org's secret reference; never client
+    # settable, never written to meta.json, never inside a sandbox.
+    api_key = params.get("_api_key")
     if base_url:
-        return OpenAICompatProvider(model=model, base_url=base_url)
-    return AnthropicProvider(model=model)
+        return OpenAICompatProvider(model=model, base_url=base_url, api_key=api_key)
+    return AnthropicProvider(model=model, api_key=api_key)
 
 
 # Task ids are hex and nothing else. Beyond hygiene: the id is interpolated
@@ -157,6 +160,7 @@ class TaskHandle:
     state_dir: Path
     org_id: str = auth.LOCAL_ORG
     created_by: str = auth.LOCAL_USER
+    on_trial: bool = False
     status: str = "running"  # running | complete | stopped | error
     agent: Agent | None = None
     thread: threading.Thread | None = None
@@ -180,6 +184,10 @@ class TaskHandle:
         }
 
 
+class TrialExhausted(RuntimeError):
+    """The pooled trial is spent and no BYOK key is configured."""
+
+
 class TaskManager:
     """Owns every task: registry of live handles + lazy loading from disk."""
 
@@ -190,6 +198,35 @@ class TaskManager:
         self.lock = threading.Lock()
         self.store = store or (Store(self.base_dir / ".opposable-identity.db")
                                if config.auth_enabled() else None)
+        self.secrets = secrets_store.build(self.base_dir)
+
+    # ----------------------------------------------------------- credentials
+
+    def resolve_credentials(self, identity: Identity) -> tuple[str | None, bool]:
+        """Pick the key this task runs on. Returns ``(api_key, on_trial)``.
+
+        ``None`` means "the process's own environment key" — which is the
+        local operator's key locally, and the platform's trial key in hosted
+        mode. Those are the only two cases, and the trial one is capped.
+        """
+        if not self.store or identity.is_local:
+            return None, False
+        org = self.store.org(identity.org_id) or {}
+        ref = org.get("byok_ref")
+        if ref:
+            key = self.secrets.get(ref)
+            if not key:
+                raise TrialExhausted("your stored provider key could not be read; re-enter it")
+            return key, False
+        if org.get("trial_tasks_used", 0) >= config.TRIAL_TASKS:
+            raise TrialExhausted(
+                "your free trial is used up — add your own provider key to continue"
+            )
+        if org.get("trial_micros_used", 0) >= config.TRIAL_MICROS:
+            raise TrialExhausted(
+                "your free trial budget is used up — add your own provider key to continue"
+            )
+        return None, True
 
     # ---------------------------------------------------------------- events
 
@@ -249,6 +286,9 @@ class TaskManager:
         )
 
     def create(self, task: str, params: dict, identity: Identity = auth.LOCAL_IDENTITY) -> TaskHandle:
+        api_key, on_trial = self.resolve_credentials(identity)
+        if api_key:
+            params = {**params, "_api_key": api_key}
         # Full 128 bits. The old uuid4().hex[:8] was 32 bits: enumerable, and
         # at ~65k tasks a coin flip to collide -- which silently corrupts one
         # task with another's events rather than failing loudly.
@@ -264,6 +304,7 @@ class TaskManager:
             state_dir=state_dir,
             org_id=identity.org_id,
             created_by=identity.user_id,
+            on_trial=on_trial,
             params=params,
         )
         with self.lock:
@@ -297,6 +338,12 @@ class TaskManager:
         self._write_meta(handle)
         self._start_worker(handle, prompt, resumed=True)
 
+    def _charge_trial(self, handle: TaskHandle) -> None:
+        if not (handle.on_trial and self.store and handle.agent):
+            return
+        micros = config.estimate_micros(handle.params.get("model"), handle.agent.usage)
+        self.store.record_trial_use(handle.org_id, micros)
+
     def _start_worker(self, handle: TaskHandle, task: str, resumed: bool) -> None:
         self._emit(handle, "status", {"state": "running", "resumed": resumed})
 
@@ -311,15 +358,21 @@ class TaskManager:
                     handle.status = "stopped"
             except Exception as exc:  # noqa: BLE001 — surface, never swallow
                 handle.status = "error"
+                # Scrubbed: a provider error can quote the request, and the
+                # request carries the key.
                 self._emit(
                     handle, "status",
-                    {"state": "error", "detail": f"{type(exc).__name__}: {exc}"},
+                    {
+                        "state": "error",
+                        "detail": secrets_store.scrub(f"{type(exc).__name__}: {exc}"),
+                    },
                 )
             else:
                 # "complete" is already conveyed by the done event; the status
                 # kind only carries running / stopped / error (see PRD table).
                 if handle.status != "complete":
                     self._emit(handle, "status", {"state": handle.status})
+            self._charge_trial(handle)
             self._write_meta(handle)
 
         handle.thread = threading.Thread(target=work, daemon=True, name=f"task-{handle.id}")
@@ -521,8 +574,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, str(exc))
             try:
                 handle = self.manager.create(task, params, identity)
+            except TrialExhausted as exc:
+                return self._error(402, str(exc))
             except Exception as exc:  # noqa: BLE001 — e.g. missing API key
-                return self._error(500, f"{type(exc).__name__}: {exc}")
+                return self._error(500, secrets_store.scrub(f"{type(exc).__name__}: {exc}"))
             return self._json(201, handle.meta())
 
         handle = self._task_or_404(parts[2], identity)
@@ -581,6 +636,23 @@ class Handler(BaseHTTPRequestHandler):
                 "email": identity.email,
                 "email_verified": identity.email_verified,
             })
+        if rest == ["keys"]:
+            identity = self._require_identity()
+            if not identity:
+                return
+            org = self.manager.store.org(identity.org_id) or {}
+            # Never the key, not even masked: there is no use for it here that
+            # is worth the risk of a logged response body.
+            return self._json(200, {
+                "configured": bool(org.get("byok_ref")),
+                "provider": org.get("byok_provider"),
+                "trial_tasks_remaining": max(
+                    0, config.TRIAL_TASKS - int(org.get("trial_tasks_used", 0))
+                ),
+                "trial_micros_remaining": max(
+                    0, config.TRIAL_MICROS - int(org.get("trial_micros_used", 0))
+                ),
+            })
         if rest == ["verify"]:
             query = parse_qs(urlsplit(self.path).query)
             token = (query.get("token") or [""])[0]
@@ -624,6 +696,28 @@ class Handler(BaseHTTPRequestHandler):
                 {"user_id": identity.user_id, "org_id": identity.org_id, "email": identity.email},
                 auth.cookie_header(secret),
             )
+
+        if rest == ["keys"]:
+            identity = self._require_identity()
+            if not identity:
+                return
+            provider = body.get("provider", "anthropic")
+            key = (body.get("key") or "").strip()
+            if provider not in ("anthropic", "openai"):
+                return self._error(400, "unknown provider")
+            if not key:
+                # Clearing drops the value from the secret manager as well as
+                # the reference; an orphaned secret is still a secret.
+                org = db.org(identity.org_id) or {}
+                if org.get("byok_ref"):
+                    self.manager.secrets.delete(org["byok_ref"])
+                db.set_byok(identity.org_id, None, None)
+                return self._json(200, {"configured": False})
+            ref = f"byok/{identity.org_id}"
+            self.manager.secrets.put(ref, key)
+            db.set_byok(identity.org_id, ref, provider)
+            # The reference goes in the database; the key does not.
+            return self._json(200, {"configured": True, "provider": provider})
 
         if rest == ["logout"]:
             secret = auth.session_from_cookies(self.headers.get("Cookie"))

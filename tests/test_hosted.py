@@ -523,6 +523,134 @@ def test_hosted_registration_requires_affirmative_acceptance(tmp_path, hosted):
     httpd.shutdown()
 
 
+# ------------------------------------------------------------------- 0e: BYOK
+
+
+def test_a_stored_key_never_reaches_the_database(tmp_path, multi_user):
+    httpd, port = start_server(tmp_path, SCRIPT)
+    headers = sign_up(port, "byokdb@example.com")
+    key = "sk-ant-secret-byok-value-000000000000"
+    assert request(port, "POST", "/api/auth/keys", {"provider": "anthropic", "key": key}, headers)[0] == 200
+
+    db = (tmp_path / ".opposable-identity.db").read_bytes()
+    assert key.encode() not in db, "the database holds a reference, never the key"
+    org_id = request(port, "GET", "/api/auth/me", None, headers)[1]["org_id"]
+    assert httpd.manager.store.org(org_id)["byok_ref"] == f"byok/{org_id}"
+    assert httpd.manager.secrets.get(f"byok/{org_id}") == key
+    httpd.shutdown()
+
+
+def test_the_key_is_never_echoed_back(tmp_path, multi_user):
+    httpd, port = start_server(tmp_path, SCRIPT)
+    headers = sign_up(port, "echo@example.com")
+    key = "sk-ant-secret-byok-value-111111111111"
+    request(port, "POST", "/api/auth/keys", {"provider": "anthropic", "key": key}, headers)
+    status, body = request(port, "GET", "/api/auth/keys", None, headers)
+    assert status == 200 and body["configured"] is True
+    assert key not in json.dumps(body)
+    httpd.shutdown()
+
+
+def test_clearing_a_key_removes_it_from_the_secret_store(tmp_path, multi_user):
+    httpd, port = start_server(tmp_path, SCRIPT)
+    headers = sign_up(port, "clear@example.com")
+    key = "sk-ant-secret-byok-value-222222222222"
+    request(port, "POST", "/api/auth/keys", {"provider": "anthropic", "key": key}, headers)
+    org_id = request(port, "GET", "/api/auth/me", None, headers)[1]["org_id"]
+    request(port, "POST", "/api/auth/keys", {"key": ""}, headers)
+    assert httpd.manager.secrets.get(f"byok/{org_id}") is None, "an orphaned secret is still a secret"
+    assert httpd.manager.store.org(org_id)["byok_ref"] is None
+    httpd.shutdown()
+
+
+def test_no_provider_key_ever_enters_the_sandbox(tmp_path, multi_user, monkeypatch):
+    """LLM calls go through our process, so the agent never handles the key.
+    That is also the only durable prompt-injection defence."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-platform-33333333333333333333")
+    httpd, port = start_server(tmp_path, SCRIPT)
+    headers = sign_up(port, "gateway@example.com")
+    key = "sk-ant-user-byok-44444444444444444444"
+    request(port, "POST", "/api/auth/keys", {"provider": "anthropic", "key": key}, headers)
+    _, meta = request(port, "POST", "/api/tasks", {"task": "x" * 100}, headers)
+    sse_events(port, meta["id"], headers=headers)
+
+    workdir = tmp_path / f".opposable-{meta['id']}"
+    for path in workdir.rglob("*"):
+        if path.is_file():
+            assert key not in path.read_text(encoding="utf-8", errors="replace")
+            assert "sk-ant-platform" not in path.read_text(encoding="utf-8", errors="replace")
+    # ...and not in the meta the client can read back either
+    assert key not in json.dumps(request(port, "GET", f"/api/tasks/{meta['id']}", None, headers)[1])
+    httpd.shutdown()
+
+
+def test_secrets_are_scrubbed_on_the_way_into_a_log():
+    from opposable import secrets_store
+
+    secrets_store.register_secret("sk-ant-registered-value-5555555555555555")
+    text = (
+        "request failed with sk-ant-registered-value-5555555555555555 and "
+        "sk-unregistered-but-obvious-666666 and AKIAABCDEFGHIJKLMNOP"
+    )
+    scrubbed = secrets_store.scrub(text)
+    assert "sk-ant-registered-value" not in scrubbed
+    assert "sk-unregistered-but-obvious" not in scrubbed
+    assert "AKIAABCDEFGHIJKLMNOP" not in scrubbed
+    assert scrubbed.count(secrets_store.REDACTED) == 3
+
+
+def test_the_trial_is_capped_by_task_count(tmp_path, multi_user):
+    httpd, port = start_server(tmp_path, [] )
+    headers = sign_up(port, "trial@example.com")
+    org_id = request(port, "GET", "/api/auth/me", None, headers)[1]["org_id"]
+    for _ in range(config.TRIAL_TASKS):
+        httpd.manager.store.record_trial_use(org_id, 0)
+    status, body = request(port, "POST", "/api/tasks", {"task": "x" * 100}, headers)
+    assert status == 402 and "trial is used up" in body["error"]
+    httpd.shutdown()
+
+
+def test_the_trial_is_capped_by_spend(tmp_path, multi_user):
+    httpd, port = start_server(tmp_path, [])
+    headers = sign_up(port, "spend@example.com")
+    org_id = request(port, "GET", "/api/auth/me", None, headers)[1]["org_id"]
+    httpd.manager.store.record_trial_use(org_id, config.TRIAL_MICROS)
+    status, body = request(port, "POST", "/api/tasks", {"task": "x" * 100}, headers)
+    assert status == 402 and "budget is used up" in body["error"]
+    httpd.shutdown()
+
+
+def test_a_byok_user_is_not_subject_to_the_trial_cap(tmp_path, multi_user):
+    httpd, port = start_server(tmp_path, SCRIPT)
+    headers = sign_up(port, "unlimited@example.com")
+    org_id = request(port, "GET", "/api/auth/me", None, headers)[1]["org_id"]
+    for _ in range(config.TRIAL_TASKS + 5):
+        httpd.manager.store.record_trial_use(org_id, config.TRIAL_MICROS)
+    request(
+        port, "POST", "/api/auth/keys",
+        {"provider": "anthropic", "key": "sk-ant-mine-77777777777777777777"}, headers,
+    )
+    assert request(port, "POST", "/api/tasks", {"task": "x" * 100}, headers)[0] == 201
+    httpd.shutdown()
+
+
+def test_trial_spend_is_recorded_after_a_run(tmp_path, multi_user):
+    httpd, port = start_server(tmp_path, SCRIPT)
+    headers = sign_up(port, "meter@example.com")
+    org_id = request(port, "GET", "/api/auth/me", None, headers)[1]["org_id"]
+    _, meta = request(port, "POST", "/api/tasks", {"task": "x" * 100}, headers)
+    sse_events(port, meta["id"], headers=headers)
+    deadline = time.time() + 10
+    while httpd.manager.store.org(org_id)["trial_tasks_used"] == 0 and time.time() < deadline:
+        time.sleep(0.05)
+    assert httpd.manager.store.org(org_id)["trial_tasks_used"] == 1
+    httpd.shutdown()
+
+
+def test_hosted_refuses_the_local_file_secret_store(hosted):
+    assert any("secret manager" in p for p in config.preflight())
+
+
 # --------------------------------------------- 0d: user content off our origin
 
 

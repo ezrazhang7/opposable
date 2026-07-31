@@ -38,6 +38,14 @@ CREATE TABLE IF NOT EXISTS orgs (
     slug        TEXT UNIQUE COLLATE NOCASE NOT NULL,
     name        TEXT NOT NULL,
     plan        TEXT NOT NULL DEFAULT 'free',
+    -- A *reference* into the secret manager. The key itself is never here:
+    -- a database dump must not be a set of working provider credentials.
+    byok_ref    TEXT,
+    byok_provider TEXT,
+    -- The only pooled spend in v1. Two counters rather than a ledger,
+    -- because v1 deliberately has no billing system (HOSTED_PRD §8).
+    trial_tasks_used  INTEGER NOT NULL DEFAULT 0,
+    trial_micros_used INTEGER NOT NULL DEFAULT 0,
     created_at  REAL NOT NULL
 );
 
@@ -168,6 +176,28 @@ class Store:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM orgs WHERE id = ?", (org_id,)).fetchone()
         return dict(row) if row else None
+
+    # ------------------------------------------------------------ BYOK, trial
+
+    def set_byok(self, org_id: str, ref: str | None, provider: str | None) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE orgs SET byok_ref = ?, byok_provider = ? WHERE id = ?",
+                (ref, provider, org_id),
+            )
+
+    def record_trial_use(self, org_id: str, micros: int) -> None:
+        """Pooled spend is charged after the fact here because v1 has no
+        gateway to reserve against. That is acceptable only because the trial
+        is 2-3 tasks; when pooled inference arrives, the reservation has to be
+        atomic and at the gateway, or an agent making 500 sequential calls
+        walks straight past a per-call check."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE orgs SET trial_tasks_used = trial_tasks_used + 1,"
+                " trial_micros_used = trial_micros_used + ? WHERE id = ?",
+                (int(micros), org_id),
+            )
 
     def mark_email_verified(self, user_id: str) -> None:
         with self._connect() as conn:
