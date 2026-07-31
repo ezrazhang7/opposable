@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 
-from opposable import auth, config, egress
+from opposable import auth, config, egress, quotas
 from opposable.providers import ToolCall
 from opposable.sandbox import SANDBOX_ENV_ALLOWLIST, LocalSandbox, sandbox_env
 from opposable.server import _check_params
@@ -521,6 +521,99 @@ def test_hosted_registration_requires_affirmative_acceptance(tmp_path, hosted):
     )
     assert status == 400 and "terms of service" in body["error"]
     httpd.shutdown()
+
+
+# --------------------------------------------------------- 0f: abuse response
+
+
+def test_concurrency_is_capped_per_plan(tmp_path, multi_user):
+    many = [turn(ToolCall(f"t{i}", "shell_exec", {"command": "echo tick"})) for i in range(200)]
+    httpd, port = start_server(tmp_path, many, slow=True)
+    headers = sign_up(port, "concurrent@example.com")
+    assert request(port, "POST", "/api/tasks", {"task": "x" * 200}, headers)[0] == 201
+    status, body = request(port, "POST", "/api/tasks", {"task": "x" * 200}, headers)
+    assert status == 429 and "at a time" in body["error"]
+    assert any(e["action"] == "quota.refused" for e in httpd.manager.audit.entries())
+    httpd.shutdown()
+
+
+def test_a_run_past_its_wall_clock_is_stopped(tmp_path, multi_user, monkeypatch):
+    monkeypatch.setattr(
+        quotas, "PLANS", {"free": quotas.Limits(1, wall_clock_seconds=1, egress_bytes_per_hour=10**9)}
+    )
+    from opposable.server import TaskManager
+
+    monkeypatch.setattr(TaskManager, "WATCHDOG_INTERVAL", 0.2)
+    many = [turn(ToolCall(f"t{i}", "shell_exec", {"command": "echo tick"})) for i in range(500)]
+    httpd, port = start_server(tmp_path, many, slow=True)
+    headers = sign_up(port, "runaway@example.com")
+    _, meta = request(port, "POST", "/api/tasks", {"task": "x" * 200}, headers)
+
+    deadline = time.time() + 30
+    while httpd.manager.get(meta["id"]).status == "running" and time.time() < deadline:
+        time.sleep(0.1)
+    assert httpd.manager.get(meta["id"]).status == "stopped"
+    assert any(e["action"] == "quota.wall_clock" for e in httpd.manager.audit.entries())
+    httpd.shutdown()
+
+
+def test_sustained_egress_suspends_the_account(tmp_path, multi_user, monkeypatch):
+    """Suspended rather than throttled: exfiltration that is merely slowed
+    down still completes."""
+    monkeypatch.setattr(
+        quotas, "PLANS", {"free": quotas.Limits(1, wall_clock_seconds=600, egress_bytes_per_hour=10)}
+    )
+    httpd, port = start_server(tmp_path, SCRIPT)
+    headers = sign_up(port, "exfil@example.com")
+    _, meta = request(port, "POST", "/api/tasks", {"task": "x" * 100}, headers)
+    handle = httpd.manager.get(meta["id"])
+    httpd.manager._observe(handle, "observation", {"name": "web_fetch", "text": "x" * 500})
+
+    user = httpd.manager.store.user_by_email("exfil@example.com")
+    assert user["suspended_at"] is not None
+    assert request(port, "GET", "/api/auth/me", None, headers)[0] == 401
+    assert any(e["action"] == "abuse.suspend" for e in httpd.manager.audit.entries())
+    httpd.shutdown()
+
+
+def test_every_command_and_url_is_audited(tmp_path, multi_user):
+    httpd, port = start_server(tmp_path, SCRIPT)
+    headers = sign_up(port, "audited@example.com")
+    _, meta = request(port, "POST", "/api/tasks", {"task": "x" * 100}, headers)
+    sse_events(port, meta["id"], headers=headers)
+
+    entries = httpd.manager.audit.entries()
+    actions = {e["action"] for e in entries}
+    assert "auth.register" in actions and "auth.login" in actions
+    assert "tool.shell_exec" in actions and "tool.file_write" in actions
+    shell = [e for e in entries if e["action"] == "tool.shell_exec"][0]
+    assert "server-test-ok" in shell["detail"]["args"]
+    assert shell["org_id"] and shell["task_id"] == meta["id"]
+    httpd.shutdown()
+
+
+def test_the_audit_log_scrubs_secrets(tmp_path):
+    from opposable import secrets_store
+    from opposable.audit import AuditLog
+
+    secrets_store.register_secret("sk-ant-audit-secret-88888888888888")
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.record("tool.shell_exec", args="curl -H 'x: sk-ant-audit-secret-88888888888888'")
+    assert "sk-ant-audit-secret" not in (tmp_path / "audit.jsonl").read_text(encoding="utf-8")
+
+
+def test_audit_retention_is_enforced_not_just_documented(tmp_path):
+    from opposable.audit import AuditLog
+
+    log = AuditLog(tmp_path / "audit.jsonl", retention=1)
+    log.record("tool.shell_exec", args="old")
+    entries = log.entries()
+    (tmp_path / "audit.jsonl").write_text(
+        json.dumps({**entries[0], "at": time.time() - 100}) + "\n", encoding="utf-8"
+    )
+    log.record("tool.shell_exec", args="new")
+    assert log.prune() == 1
+    assert [e["detail"]["args"] for e in log.entries()] == ["new"]
 
 
 # ------------------------------------------------------------------- 0e: BYOK

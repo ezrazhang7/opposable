@@ -36,7 +36,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
-from . import auth, config, secrets_store
+from . import auth, config, quotas, secrets_store
+from .audit import AuditLog
 from .auth import Identity
 from .loop import Agent, RunResult
 from .providers import AnthropicProvider, OpenAICompatProvider, Provider
@@ -161,6 +162,7 @@ class TaskHandle:
     org_id: str = auth.LOCAL_ORG
     created_by: str = auth.LOCAL_USER
     on_trial: bool = False
+    started_at: float = 0.0
     status: str = "running"  # running | complete | stopped | error
     agent: Agent | None = None
     thread: threading.Thread | None = None
@@ -191,6 +193,9 @@ class TrialExhausted(RuntimeError):
 class TaskManager:
     """Owns every task: registry of live handles + lazy loading from disk."""
 
+    #: How often the wall-clock watchdog sweeps.
+    WATCHDOG_INTERVAL = 5
+
     def __init__(self, base_dir: str | None = None, provider_factory=None, store: Store | None = None):
         self.base_dir = Path(base_dir or Path.cwd())
         self.provider_factory = provider_factory or default_provider_factory
@@ -199,6 +204,9 @@ class TaskManager:
         self.store = store or (Store(self.base_dir / ".opposable-identity.db")
                                if config.auth_enabled() else None)
         self.secrets = secrets_store.build(self.base_dir)
+        self.audit = AuditLog(self.base_dir / ".opposable-audit.jsonl")
+        self.egress_meter = quotas.EgressMeter()
+        self._watchdog: threading.Thread | None = None
 
     # ----------------------------------------------------------- credentials
 
@@ -239,6 +247,49 @@ class TaskManager:
                 f.write(line + "\n")
             for q in handle.subscribers:
                 q.put(event)
+        # Outside the lock: auditing must never be able to stall the agent.
+        self._observe(handle, kind, payload)
+
+    def _observe(self, handle: TaskHandle, kind: str, payload: dict) -> None:
+        """Audit what the agent did, and meter what it pulled in.
+
+        The event stream already carries every tool call and its result, so
+        this rides on it rather than threading a second channel through the
+        loop.
+        """
+        if kind == "tool":
+            self.audit.record(
+                f"tool.{payload.get('name', '?')}",
+                org_id=handle.org_id,
+                user_id=handle.created_by,
+                task_id=handle.id,
+                args=json.dumps(payload.get("args", {}), sort_keys=True),
+            )
+        elif kind == "observation" and payload.get("name") == "web_fetch":
+            total = self.egress_meter.record(handle.org_id, len(payload.get("text", "")))
+            self._enforce_egress(handle, total)
+
+    def _enforce_egress(self, handle: TaskHandle, total: int) -> None:
+        plan = (self.store.org(handle.org_id) or {}).get("plan") if self.store else None
+        if quotas.should_suspend_for_egress(total, plan):
+            # Suspended, not throttled: exfiltration that is merely slowed
+            # down still completes.
+            self.audit.record(
+                "abuse.suspend", org_id=handle.org_id, user_id=handle.created_by,
+                task_id=handle.id, reason="egress", bytes=total,
+            )
+            if self.store:
+                self.store.suspend_user(handle.created_by, "sustained high egress")
+            self.stop(handle)
+        elif total > quotas.limits_for(plan).egress_bytes_per_hour:
+            self.audit.record(
+                "quota.egress", org_id=handle.org_id, task_id=handle.id, bytes=total
+            )
+            self.stop(handle)
+
+    def stop(self, handle: TaskHandle) -> None:
+        if handle.agent:
+            handle.agent.stop_requested = True
 
     def subscribe(self, handle: TaskHandle) -> tuple[list[dict], queue.SimpleQueue]:
         """Atomically snapshot history and register for future events."""
@@ -286,6 +337,7 @@ class TaskManager:
         )
 
     def create(self, task: str, params: dict, identity: Identity = auth.LOCAL_IDENTITY) -> TaskHandle:
+        self._check_quotas(identity)
         api_key, on_trial = self.resolve_credentials(identity)
         if api_key:
             params = {**params, "_api_key": api_key}
@@ -338,6 +390,44 @@ class TaskManager:
         self._write_meta(handle)
         self._start_worker(handle, prompt, resumed=True)
 
+    def _check_quotas(self, identity: Identity) -> None:
+        if not self.store or identity.is_local:
+            return
+        plan = (self.store.org(identity.org_id) or {}).get("plan")
+        with self.lock:
+            running = sum(
+                1 for h in self.tasks.values()
+                if h.org_id == identity.org_id and h.status == "running"
+            )
+        quotas.check_concurrency(running, plan)
+        quotas.check_egress(self.egress_meter.total(identity.org_id), plan)
+
+    def _ensure_watchdog(self) -> None:
+        """One thread watches every running task's wall clock.
+
+        A run that never ends is the ordinary failure here, not the exotic
+        one: a model looping costs real money and holds a sandbox open, and
+        the cooperative stop flag already exists to end it.
+        """
+        if self._watchdog and self._watchdog.is_alive():
+            return
+        self._watchdog = threading.Thread(target=self._watch, daemon=True, name="wall-clock")
+        self._watchdog.start()
+
+    def _watch(self) -> None:
+        while True:
+            time.sleep(self.WATCHDOG_INTERVAL)
+            with self.lock:
+                handles = [h for h in self.tasks.values() if h.status == "running"]
+            for handle in handles:
+                plan = (self.store.org(handle.org_id) or {}).get("plan") if self.store else None
+                if quotas.overran_wall_clock(handle.started_at, plan):
+                    self.audit.record(
+                        "quota.wall_clock", org_id=handle.org_id, task_id=handle.id,
+                        seconds=int(time.time() - handle.started_at),
+                    )
+                    self.stop(handle)
+
     def _charge_trial(self, handle: TaskHandle) -> None:
         if not (handle.on_trial and self.store and handle.agent):
             return
@@ -345,6 +435,8 @@ class TaskManager:
         self.store.record_trial_use(handle.org_id, micros)
 
     def _start_worker(self, handle: TaskHandle, task: str, resumed: bool) -> None:
+        handle.started_at = time.time()
+        self._ensure_watchdog()
         self._emit(handle, "status", {"state": "running", "resumed": resumed})
 
         def work() -> None:
@@ -574,6 +666,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, str(exc))
             try:
                 handle = self.manager.create(task, params, identity)
+            except quotas.QuotaExceeded as exc:
+                self.manager.audit.record(
+                    "quota.refused", org_id=identity.org_id, user_id=identity.user_id,
+                    reason=str(exc),
+                )
+                return self._error(429, str(exc))
             except TrialExhausted as exc:
                 return self._error(402, str(exc))
             except Exception as exc:  # noqa: BLE001 — e.g. missing API key
@@ -680,6 +778,10 @@ class Handler(BaseHTTPRequestHandler):
                 )
             except auth.AuthError as exc:
                 return self._error(400, str(exc))
+            self.manager.audit.record(
+                "auth.register", org_id=user["org_id"], user_id=user["id"],
+                terms_version=config.terms_version(),
+            )
             secret = db.create_verification(user["id"])
             auth.send_verification(
                 user["email"], auth.verification_link(config.app_origin() or "", secret)
@@ -690,7 +792,13 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 secret, identity = auth.login(db, body.get("email", ""), body.get("password", ""))
             except auth.AuthError as exc:
+                self.manager.audit.record(
+                    "auth.login_failed", user_id=body.get("email", ""), reason=str(exc)
+                )
                 return self._error(401, str(exc))
+            self.manager.audit.record(
+                "auth.login", org_id=identity.org_id, user_id=identity.user_id
+            )
             return self._json_with_cookie(
                 200,
                 {"user_id": identity.user_id, "org_id": identity.org_id, "email": identity.email},
