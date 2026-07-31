@@ -73,7 +73,12 @@ export function ComputerPanel({ step, live, onGoLive, onClose, raw, onToggleRaw 
               : "border-line text-muted hover:border-line-strong",
           )}
         >
-          <span className={cx("block h-1.5 w-1.5 rounded-full bg-current", live && "pulse")} />
+          <span
+            className={cx(
+              "block h-1.5 w-1.5 rounded-full border border-current",
+              live && "pulse bg-current",
+            )}
+          />
           Live
         </button>
         <IconButton label="Hide computer panel" onClick={onClose}>
