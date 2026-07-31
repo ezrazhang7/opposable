@@ -29,6 +29,8 @@ type Props = {
   onClose: () => void;
   raw: boolean;
   onToggleRaw: () => void;
+  /** Narrow viewports show the panel as a slide-over instead of a column. */
+  overlay?: boolean;
 };
 
 /** "opposable's computer": what the agent is doing right now, or the step you
@@ -47,6 +49,7 @@ export function ComputerPanel({
   onClose,
   raw,
   onToggleRaw,
+  overlay,
 }: Props) {
   const kind = step ? toolKind(step.name) : "unknown";
   const Icon = step ? KIND_ICON[kind] : Terminal;
@@ -55,7 +58,10 @@ export function ComputerPanel({
   return (
     <aside
       aria-label="opposable's computer"
-      className="flex h-full w-[44%] min-w-[360px] shrink-0 flex-col border-l border-line bg-panel"
+      className={cx(
+        "flex h-full shrink-0 flex-col border-l border-line bg-panel",
+        overlay ? "w-full max-w-[560px] shadow-overlay" : "w-[44%] min-w-[360px]",
+      )}
     >
       <header className="flex h-14 shrink-0 items-center gap-3 border-b border-line px-4">
         <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-raised text-muted">

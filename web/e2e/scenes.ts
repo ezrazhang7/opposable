@@ -387,6 +387,50 @@ const controls: Scene = async (browser) => {
   await dark.context().close();
 };
 
+/** Settings modal, and the layout at three widths in both themes. */
+const responsive: Scene = async (browser) => {
+  const task = await createTask(
+    "Research the Voyager program and write a briefing with sources.",
+  );
+  await waitForStatus(task.id, "complete");
+
+  for (const theme of ["light", "dark"] as Theme[]) {
+    const settings = await openPage(browser, { theme });
+    await settings.getByRole("button", { name: "Settings" }).click();
+    await settings.getByRole("dialog", { name: "Settings" }).waitFor();
+    await shoot(settings, `settings-${theme}`);
+    await settings.context().close();
+
+    for (const [name, viewport] of Object.entries(VIEWPORTS)) {
+      const page = await openPage(browser, { theme, viewport });
+      await selectNewest(page);
+      await page.getByRole("button", { name: /Completing task/ }).waitFor({ timeout: 30_000 });
+      await shoot(page, `responsive-${viewport.width}-${theme}`);
+
+      // Under 1100px the panel is a slide-over the chat can be read behind.
+      if (viewport.width < 1100) {
+        await page.getByRole("button", { name: "Show computer panel" }).click();
+        await page.waitForTimeout(300);
+        await shoot(page, `responsive-${viewport.width}-${theme}-panel`);
+      }
+      console.log(`  ${name} ${viewport.width}px ${theme}`);
+      await page.context().close();
+    }
+  }
+
+  // No horizontal overflow at any of the three widths.
+  for (const viewport of Object.values(VIEWPORTS)) {
+    const page = await openPage(browser, { theme: "light", viewport });
+    await selectNewest(page);
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    if (overflow > 0) throw new Error(`horizontal overflow of ${overflow}px at ${viewport.width}`);
+    console.log(`  no overflow at ${viewport.width}px`);
+    await page.context().close();
+  }
+};
+
 export const scenes: Record<string, Scene> = {
   shell,
   sessions,
@@ -398,4 +442,5 @@ export const scenes: Record<string, Scene> = {
   replay,
   files,
   controls,
+  responsive,
 };

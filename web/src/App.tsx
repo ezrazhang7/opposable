@@ -5,10 +5,12 @@ import { FilesDrawer } from "./components/FilesDrawer";
 import { Home } from "./components/Home";
 import { IconButton } from "./components/IconButton";
 import { PanelRight } from "./components/Icons";
+import { SettingsModal } from "./components/SettingsModal";
 import { Sidebar } from "./components/Sidebar";
 import { StatusBadge } from "./components/StatusBadge";
 import { TaskControls } from "./components/TaskControls";
 import { api } from "./lib/api";
+import { ROOMY, WIDE, useMediaQuery } from "./lib/useMediaQuery";
 import { taskParams, useSettings } from "./lib/settings";
 import { useTheme } from "./lib/theme";
 import { useSession } from "./lib/useSession";
@@ -27,6 +29,25 @@ export default function App() {
   const [playing, setPlaying] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  const wide = useMediaQuery(WIDE);
+  const roomy = useMediaQuery(ROOMY);
+
+  // Under 1100px the panel is a slide-over, so it must not start open on top
+  // of the chat; under 900px the rail folds to icons.
+  useEffect(() => {
+    if (!wide) setPanelOpen(false);
+  }, [wide]);
+  useEffect(() => setRailCollapsed(!roomy), [roomy]);
+
+  // As a slide-over it is a layer over the chat, so Escape dismisses it.
+  useEffect(() => {
+    if (wide || !panelOpen) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setPanelOpen(false);
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [wide, panelOpen]);
 
   const { tasks, error, refresh } = useTasks();
   const selected = tasks.find((t) => t.id === selectedId) ?? null;
@@ -65,6 +86,28 @@ export default function App() {
   const status = selected ? session.status : null;
   const statusDetail = session.statusDetail;
 
+  const panel = (
+    <ComputerPanel
+      step={shownStep}
+      steps={session.steps}
+      activeStep={activeStep}
+      onSelectStep={selectStep}
+      plan={session.plan}
+      live={live}
+      onGoLive={() => {
+        setLive(true);
+        setPlaying(false);
+      }}
+      replayable={status !== "running"}
+      playing={playing}
+      onSetPlaying={setPlaying}
+      onClose={() => setPanelOpen(false)}
+      raw={raw}
+      onToggleRaw={() => setRaw((v) => !v)}
+      overlay={!wide}
+    />
+  );
+
   return (
     <div className="flex h-full overflow-hidden bg-bg text-fg">
       <Sidebar
@@ -76,6 +119,7 @@ export default function App() {
         selectedId={selectedId}
         onSelect={setSelectedId}
         onNewTask={() => setSelectedId(null)}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
 
       <main className="flex min-w-0 flex-1">
@@ -140,27 +184,28 @@ export default function App() {
           )}
         </section>
 
-        {panelOpen && (
-          <ComputerPanel
-            step={shownStep}
-            steps={session.steps}
-            activeStep={activeStep}
-            onSelectStep={selectStep}
-            plan={session.plan}
-            live={live}
-            onGoLive={() => {
-              setLive(true);
-              setPlaying(false);
-            }}
-            replayable={status !== "running"}
-            playing={playing}
-            onSetPlaying={setPlaying}
-            onClose={() => setPanelOpen(false)}
-            raw={raw}
-            onToggleRaw={() => setRaw((v) => !v)}
-          />
-        )}
+        {panelOpen && wide && panel}
       </main>
+
+      {panelOpen && !wide && (
+        <div className="fixed inset-0 z-20 flex justify-end">
+          <button
+            type="button"
+            aria-label="Close computer panel"
+            onClick={() => setPanelOpen(false)}
+            className="flex-1 bg-stone-900/25 backdrop-blur-[1px]"
+          />
+          {panel}
+        </div>
+      )}
+
+      {settingsOpen && (
+        <SettingsModal
+          settings={settings}
+          onUpdate={updateSettings}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
 
       {filesOpen && selected && (
         <FilesDrawer
