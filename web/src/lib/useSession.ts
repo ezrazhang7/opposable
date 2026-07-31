@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   openEvents,
   type AgentEvent,
@@ -29,9 +29,13 @@ export type Session = {
   plan: string | null;
   done: EventPayloads["done"] | null;
   status: TaskStatus;
+  /** Why a run ended badly, when the server said. */
+  statusDetail: string | null;
   /** Set once the server has closed the stream: the task is not running. */
   ended: boolean;
   error: string | null;
+  /** Reopen the stream — used after resuming a task the server had closed. */
+  reconnect: () => void;
 };
 
 /** Subscribes to one task's event stream. History replays before live events,
@@ -40,8 +44,10 @@ export function useSession(task: TaskMeta | null): Session {
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [ended, setEnded] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [nonce, setNonce] = useState(0);
   const seen = useRef(new Set<number>());
   const id = task?.id ?? null;
+  const reconnect = useCallback(() => setNonce((n) => n + 1), []);
 
   useEffect(() => {
     seen.current = new Set();
@@ -59,7 +65,7 @@ export function useSession(task: TaskMeta | null): Session {
       onEof: () => setEnded(true),
       onError: () => setError("event stream disconnected"),
     });
-  }, [id]);
+  }, [id, nonce]);
 
   const steps = useMemo(() => {
     const byStep = new Map<number, Step>();
@@ -85,6 +91,9 @@ export function useSession(task: TaskMeta | null): Session {
     if (task) out.push({ key: "task", kind: "user", text: task.task });
     for (const e of events) {
       switch (e.kind) {
+        case "user":
+          out.push({ key: `u${e.seq}`, kind: "user", text: e.payload.text });
+          break;
         case "assistant":
           if (e.payload.text.trim()) {
             out.push({ key: `a${e.seq}`, kind: "assistant", text: e.payload.text });
@@ -133,5 +142,22 @@ export function useSession(task: TaskMeta | null): Session {
     return latest ?? task?.status ?? "running";
   }, [events, ended, task?.status]);
 
-  return { events, items, steps, plan, done, status, ended, error };
+  const statusDetail = useMemo(() => {
+    let latest: string | null = null;
+    for (const e of events) if (e.kind === "status") latest = e.payload.detail ?? null;
+    return latest;
+  }, [events]);
+
+  return {
+    events,
+    items,
+    steps,
+    plan,
+    done,
+    status,
+    statusDetail,
+    ended,
+    error,
+    reconnect,
+  };
 }

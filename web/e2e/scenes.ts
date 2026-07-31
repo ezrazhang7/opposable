@@ -347,6 +347,46 @@ const files: Scene = async (browser) => {
   await withImage.context().close();
 };
 
+/** Stop a run, send guidance, and pick a stopped task back up. */
+const controls: Scene = async (browser) => {
+  const task = await createTask("Crawl the archive index and summarise it.", "long");
+  const page = await openPage(browser, { theme: "light" });
+  await selectNewest(page);
+  await page.getByRole("button", { name: /Executing command/ }).first().waitFor({
+    timeout: 30_000,
+  });
+  await shoot(page, "controls-running");
+
+  // Guidance lands in the transcript as a user bubble.
+  const composer = page.getByRole("textbox", { name: /Send guidance/ });
+  await composer.fill("Focus on the 1977 launches only.");
+  await composer.press("Enter");
+  await page.getByText("Focus on the 1977 launches only.").waitFor();
+  await shoot(page, "controls-guidance-sent");
+
+  await page.getByRole("button", { name: "Stop", exact: true }).click();
+  await page.getByRole("button", { name: "Resume", exact: true }).waitFor({ timeout: 30_000 });
+  await waitForStatus(task.id, "stopped");
+  await page.waitForTimeout(400);
+  await shoot(page, "controls-stopped");
+
+  await page.getByRole("button", { name: "Resume", exact: true }).click();
+  await page.getByRole("button", { name: "Stop", exact: true }).waitFor({ timeout: 30_000 });
+  await page.waitForTimeout(600);
+  await shoot(page, "controls-resumed");
+  await stopTask(task.id);
+  await page.context().close();
+
+  // An error status is a badge too: a script that runs out of turns errors.
+  const dark = await openPage(browser, { theme: "dark" });
+  await selectNewest(dark);
+  await dark.getByRole("button", { name: /Executing command/ }).first().waitFor({
+    timeout: 30_000,
+  });
+  await shoot(dark, "controls-dark");
+  await dark.context().close();
+};
+
 export const scenes: Record<string, Scene> = {
   shell,
   sessions,
@@ -357,4 +397,5 @@ export const scenes: Record<string, Scene> = {
   plan,
   replay,
   files,
+  controls,
 };

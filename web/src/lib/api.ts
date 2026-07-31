@@ -25,6 +25,9 @@ export type CreateTaskBody = {
 export type Usage = Record<string, number>;
 
 export type EventPayloads = {
+  /** The task's own follow-up guidance, echoed back so it lands in the
+   *  transcript the same way the model receives it. */
+  user: { text: string };
   assistant: { text: string };
   tool: { name: string; args: Record<string, unknown>; step: number };
   observation: { name: string; text: string; step: number };
@@ -42,6 +45,7 @@ export type EventPayloads = {
 
 export type EventKind = keyof EventPayloads;
 export const EVENT_KINDS: EventKind[] = [
+  "user",
   "assistant",
   "tool",
   "observation",

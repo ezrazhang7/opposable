@@ -7,7 +7,7 @@ The frontend (web/) is a static SPA; this server is its entire backend:
     GET  /api/tasks/{id}             metadata + full event history
     GET  /api/tasks/{id}/events      SSE live stream (history replayed first)
     POST /api/tasks/{id}/stop        cooperative stop
-    POST /api/tasks/{id}/messages    follow-up guidance while running
+    POST /api/tasks/{id}/messages    follow-up guidance while running (user event)
     POST /api/tasks/{id}/resume      pick a stopped task back up
     GET  /api/tasks/{id}/files       flat listing of the task workdir
     GET  /api/tasks/{id}/files/{p}   raw file content
@@ -165,17 +165,29 @@ class TaskManager:
         self._start_worker(handle, task, resumed=False)
         return handle
 
+    def add_message(self, handle: TaskHandle, text: str) -> None:
+        """Queue follow-up guidance for the next iteration, and put it in the
+        transcript: the model will see it as a user turn, so the UI must too."""
+        if not handle.agent:
+            raise ValueError("task has no agent")
+        handle.agent.inbox.append(text)
+        self._emit(handle, "user", {"text": text})
+
     def resume(self, handle: TaskHandle, message: str | None = None) -> None:
         if handle.status == "running":
             raise ValueError("task is already running")
+        prompt = message or RESUME_TASK
         handle.agent = self._build_agent(handle)
         if handle.agent.load_state():
             # Agent.run() ignores its task argument when the ledger already has
             # history, so the resume prompt must travel via the inbox instead.
-            handle.agent.inbox.append(message or RESUME_TASK)
+            handle.agent.inbox.append(prompt)
+        # Emitted before the worker starts so the transcript reads in order:
+        # the guidance, then the run it kicked off.
+        self._emit(handle, "user", {"text": prompt})
         handle.status = "running"
         self._write_meta(handle)
-        self._start_worker(handle, message or RESUME_TASK, resumed=True)
+        self._start_worker(handle, prompt, resumed=True)
 
     def _start_worker(self, handle: TaskHandle, task: str, resumed: bool) -> None:
         self._emit(handle, "status", {"state": "running", "resumed": resumed})
@@ -354,7 +366,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "text is required")
             if handle.status != "running" or not handle.agent:
                 return self._error(409, "task is not running — use resume")
-            handle.agent.inbox.append(text)
+            self.manager.add_message(handle, text)
             return self._json(202, {"ok": True})
 
         if parts[3] == "resume":

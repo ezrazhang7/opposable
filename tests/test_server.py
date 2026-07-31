@@ -204,6 +204,28 @@ def test_follow_up_message_reaches_the_model(tmp_path):
     assert "also include a second section" in rendered
 
 
+def test_follow_up_is_recorded_as_a_user_event(tmp_path):
+    """Guidance sent mid-run shows up in the transcript, not just the ledger."""
+    many = [turn(ToolCall(f"t{i}", "shell_exec", {"command": "echo tick"})) for i in range(100)]
+    httpd, port = start_server(tmp_path, many, slow=True)
+    _, meta = request(port, "POST", "/api/tasks", {"task": LONG_TASK * 2})
+    task_id = meta["id"]
+    sse_events(port, task_id, until_kinds=("observation",))
+
+    status, _ = request(
+        port, "POST", f"/api/tasks/{task_id}/messages", {"text": "also chart the result"}
+    )
+    assert status == 202
+    request(port, "POST", f"/api/tasks/{task_id}/stop")
+    events = sse_events(port, task_id, until_kinds=("done",))
+    assert ("user", {"text": "also chart the result"}) in events
+
+    # ...and it survives a reload, because it is in events.jsonl
+    _, detail = request(port, "GET", f"/api/tasks/{task_id}")
+    assert any(e["kind"] == "user" for e in detail["events"])
+    httpd.shutdown()
+
+
 def test_validation_errors(tmp_path):
     httpd, port = start_server(tmp_path, SCRIPT)
     status, body = request(port, "POST", "/api/tasks", {"task": "   "})

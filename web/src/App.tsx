@@ -6,7 +6,8 @@ import { Home } from "./components/Home";
 import { IconButton } from "./components/IconButton";
 import { PanelRight } from "./components/Icons";
 import { Sidebar } from "./components/Sidebar";
-import { StatusIcon, STATUS_LABEL } from "./components/StatusIcon";
+import { StatusBadge } from "./components/StatusBadge";
+import { TaskControls } from "./components/TaskControls";
 import { api } from "./lib/api";
 import { taskParams, useSettings } from "./lib/settings";
 import { useTheme } from "./lib/theme";
@@ -62,6 +63,7 @@ export default function App() {
   };
 
   const status = selected ? session.status : null;
+  const statusDetail = session.statusDetail;
 
   return (
     <div className="flex h-full overflow-hidden bg-bg text-fg">
@@ -81,14 +83,13 @@ export default function App() {
           <header className="flex h-14 items-center gap-3 border-b border-line px-4">
             {selected && status ? (
               <>
-                <StatusIcon status={status} />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-[13px] font-medium">{selected.title}</p>
                   <p className="truncate text-[11px] text-faint">
-                    {STATUS_LABEL[status]}
-                    {selected.model ? ` · ${selected.model}` : ""}
+                    {selected.model ?? "default model"} · {selected.sandbox} sandbox
                   </p>
                 </div>
+                <StatusBadge status={status} detail={statusDetail ?? undefined} />
               </>
             ) : (
               <p className="min-w-0 flex-1 truncate text-[13px] font-medium text-muted">
@@ -123,6 +124,19 @@ export default function App() {
             <div className="min-h-0 flex-1 overflow-y-auto">
               <Home settings={settings} onUpdateSettings={updateSettings} onStart={startTask} />
             </div>
+          )}
+
+          {selected && status && (
+            <TaskControls
+              taskId={selected.id}
+              status={status}
+              onChanged={(action) => {
+                // Only a resume needs a new stream: the server closed the old
+                // one when the task finished. Messages and stops land on it.
+                if (action === "resume") session.reconnect();
+                void refresh();
+              }}
+            />
           )}
         </section>
 
