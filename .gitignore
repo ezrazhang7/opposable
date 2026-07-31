@@ -5,5 +5,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+# The built SPA. Ships inside the wheel as package data, but it is build
+# output, so it stays out of git: `npm --prefix web run build` regenerates it.
+opposable/web/
 .env
 .env.local

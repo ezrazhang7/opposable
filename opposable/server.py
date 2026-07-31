@@ -36,7 +36,9 @@ from .loop import Agent, RunResult
 from .providers import AnthropicProvider, OpenAICompatProvider, Provider
 from .sandbox import DockerSandbox, LocalSandbox
 
-WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
+# Inside the package, so `pip install opposable` carries the UI with it.
+# Vite writes here (web/vite.config.ts) and pyproject ships it as package data.
+WEB_DIST = Path(__file__).resolve().parent / "web"
 
 PLACEHOLDER_PAGE = """<!doctype html><meta charset="utf-8">
 <title>opposable</title>
@@ -44,9 +46,8 @@ PLACEHOLDER_PAGE = """<!doctype html><meta charset="utf-8">
 <div style="text-align:center;color:#57534e">
 <h1 style="color:#1c1917">opposable</h1>
 <p>API is up. The web UI has not been built yet:</p>
-<pre style="text-align:left;background:#f5f5f4;padding:1em;border-radius:12px">cd web
-npm install
-npm run build</pre>
+<pre style="text-align:left;background:#f5f5f4;padding:1em;border-radius:12px">npm --prefix web install
+npm --prefix web run build</pre>
 <p>then reload this page.</p></div>
 """
 

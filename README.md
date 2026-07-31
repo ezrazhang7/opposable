@@ -53,6 +53,12 @@ plus SSE, and every npm package lives under `web/`. During frontend work,
 `npm --prefix web run dev` serves the SPA on :5173 and proxies `/api` to the
 Python server.
 
+The build lands in **`opposable/web/`** — inside the Python package, so the
+assets travel in a wheel and `pip install opposable` gets a working UI rather
+than an API with a placeholder page. That directory is gitignored build output:
+run the frontend build before `pip wheel`/`python -m build`, and in CI before
+packaging. Node is never needed at runtime.
+
 ## Architecture
 
 ```

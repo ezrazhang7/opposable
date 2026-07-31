@@ -21,3 +21,10 @@ opposable = "opposable.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["opposable*"]
+
+# The built SPA (opposable/web/, produced by `npm --prefix web run build`) is
+# gitignored build output, but it must travel inside the wheel — otherwise a
+# pip-installed `opposable serve` has an API and no UI. Build the frontend
+# before building the distribution.
+[tool.setuptools.package-data]
+opposable = ["web/**/*"]
