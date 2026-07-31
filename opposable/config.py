@@ -95,6 +95,8 @@ def preflight() -> list[str]:
     """
     if not hosted():
         return []
+    from . import egress
+
     problems: list[str] = []
     backend = sandbox_backend()
     if not backend:
@@ -103,6 +105,12 @@ def preflight() -> list[str]:
         )
     elif backend in DEV_SANDBOX_BACKENDS:
         problems.append(f"0b: OPPOSABLE_SANDBOX_BACKEND={backend} is development-only")
+    if not egress.proxy_url():
+        problems.append("0b: OPPOSABLE_EGRESS_PROXY is unset — sandbox egress is unpoliced")
+    if not egress.denied_cidrs():
+        problems.append(
+            "0b: OPPOSABLE_DENIED_CIDRS is unset — our own VPC is reachable from a sandbox"
+        )
     return problems
 
 

@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import json
 import re
-import urllib.request
 from html.parser import HTMLParser
 from typing import Any
 
+from .. import egress
 from ..sandbox import Sandbox
 
 MAX_OBSERVATION_CHARS = 24_000  # hard cap per observation before truncation
@@ -221,12 +221,11 @@ class ToolRuntime:
                 return _truncate(self.sandbox.read_file(args["path"]), self.sandbox, label), False
 
             if name == "web_fetch":
-                req = urllib.request.Request(
-                    args["url"], headers={"User-Agent": "opposable/0.1"}
-                )
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    content_type = resp.headers.get("Content-Type", "")
-                    body = resp.read(2_000_000).decode("utf-8", errors="replace")
+                # Guarded, and deliberately not urllib: this runs in the
+                # server process, so an unguarded fetch reaches the metadata
+                # service from the *host*, and urllib follows redirects
+                # without re-checking where they lead.
+                _url, content_type, body = egress.fetch(args["url"])
                 if _looks_like_html(content_type, body):
                     # Markup is ~5-10x the tokens of the visible text and gets
                     # re-sent every iteration. Keep the raw HTML restorable on

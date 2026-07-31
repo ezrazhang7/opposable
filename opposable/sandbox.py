@@ -48,6 +48,16 @@ def sandbox_env(kind: str, extra: dict[str, str] | None = None) -> dict[str, str
         names += _WINDOWS_ENV_ALLOWLIST
     env = {name: os.environ[name] for name in names if name in os.environ}
     env["OPPOSABLE_SANDBOX"] = kind
+    # Well-behaved tools inside the sandbox honour these. Badly-behaved ones
+    # ignore them, which is why the proxy is only half the control -- the
+    # other half is a network with no other route out (see egress.py).
+    from . import egress
+
+    proxy = egress.proxy_url()
+    if proxy:
+        for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+            env[name] = proxy
+        env["no_proxy"] = env["NO_PROXY"] = "localhost,127.0.0.1"
     if extra:
         env.update(extra)
     return env
