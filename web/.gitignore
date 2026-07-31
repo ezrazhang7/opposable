@@ -4,3 +4,4 @@ e2e/shots/
 .vite/
 
 *.tsbuildinfo
+e2e/.fixtures/

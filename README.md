@@ -32,6 +32,27 @@ Interrupted? State is persisted every iteration:
 opposable resume .opposable-ab12cd34
 ```
 
+## Web UI
+
+```bash
+npm --prefix web install && npm --prefix web run build   # once; Node is build-time only
+opposable serve                                          # http://127.0.0.1:8734
+```
+
+Three zones, Manus-style: a rail of every session, the chat stream, and
+**opposable's computer** — the panel showing the tool it is using right now,
+with a terminal / editor / reader / checklist renderer per tool prefix and the
+verbatim observation one click away. Tool calls appear in the chat as action
+chips; clicking one pins the panel to that step. The footer scrubs the whole
+timeline, so any past session can be replayed step by step. Finishing a task
+gives you a summary card with its deliverables, openable and downloadable from
+a files drawer over the sandbox workdir.
+
+The Python core stays zero-dependency — `server.py` is stdlib `ThreadingHTTPServer`
+plus SSE, and every npm package lives under `web/`. During frontend work,
+`npm --prefix web run dev` serves the SPA on :5173 and proxies `/api` to the
+Python server.
+
 ## Architecture
 
 ```
@@ -102,6 +123,14 @@ pytest tests/ -q
 ```
 
 The suite runs a scripted model against a **real** sandbox — real shell, real files — proving forced planning, error-in-context adaptation, restorable compression, plan recitation, deterministic rendering, and mid-task resume, all without an API key.
+
+The UI has its own end-to-end check — create a task, watch it stream, see it
+complete, replay it — driven by headless Chromium against the same scripted
+model:
+
+```bash
+npm --prefix web run e2e
+```
 
 ## Safety
 
