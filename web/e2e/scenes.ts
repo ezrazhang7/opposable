@@ -179,4 +179,39 @@ const terminal: Scene = async (browser) => {
   await dark.context().close();
 };
 
-export const scenes: Record<string, Scene> = { shell, sessions, home, chat, terminal };
+/** The editor and reader renderers, on a finished demo run. */
+const renderers: Scene = async (browser) => {
+  const task = await createTask(
+    "Research the Voyager program and write a briefing with sources.",
+  );
+  await waitForStatus(task.id, "complete");
+
+  for (const theme of ["light", "dark"] as Theme[]) {
+    const page = await openPage(browser, { theme });
+    await selectNewest(page);
+    await page.getByRole("button", { name: /Completing task/ }).waitFor({ timeout: 30_000 });
+
+    await page.getByRole("button", { name: /Writing file report\.md/ }).click();
+    await page.waitForTimeout(200);
+    await shoot(page, `renderer-editor-write-${theme}`);
+
+    await page.getByRole("button", { name: /Browsing http/ }).click();
+    await page.waitForTimeout(200);
+    await shoot(page, `renderer-reader-${theme}`);
+
+    await page.getByRole("button", { name: /Reading file notes-typo\.md/ }).click();
+    await page.waitForTimeout(200);
+    await shoot(page, `renderer-editor-error-${theme}`);
+
+    await page.context().close();
+  }
+};
+
+export const scenes: Record<string, Scene> = {
+  shell,
+  sessions,
+  home,
+  chat,
+  terminal,
+  renderers,
+};

@@ -1,5 +1,7 @@
 import { PanelRight, Terminal } from "./Icons";
 import { IconButton } from "./IconButton";
+import { EditorView } from "./renderers/EditorView";
+import { ReaderView } from "./renderers/ReaderView";
 import { TerminalView } from "./renderers/TerminalView";
 import { Frame, Mono } from "./renderers/shared";
 import { cx } from "../lib/ui";
@@ -109,6 +111,10 @@ function StepBody({ step }: { step: Step }) {
   switch (toolKind(step.name)) {
     case "terminal":
       return <TerminalView step={step} />;
+    case "editor":
+      return <EditorView step={step} />;
+    case "reader":
+      return <ReaderView step={step} />;
     default:
       return (
         <Frame bar={<span className="font-mono text-faint">{step.name}</span>}>
