@@ -244,6 +244,52 @@ const plan: Scene = async (browser) => {
   await dark.context().close();
 };
 
+/** Reopen a finished session and scrub its timeline. */
+const replay: Scene = async (browser) => {
+  const task = await createTask(
+    "Research the Voyager program and write a briefing with sources.",
+  );
+  await waitForStatus(task.id, "complete");
+
+  const page = await openPage(browser, { theme: "light" });
+  await selectNewest(page);
+  await page.getByRole("button", { name: /Completing task/ }).waitFor({ timeout: 30_000 });
+
+  const slider = page.getByLabel("Step", { exact: true });
+  await slider.fill("0");
+  await page.waitForTimeout(200);
+  await shoot(page, "replay-step-1");
+
+  await page.getByRole("button", { name: "Next step" }).click();
+  await page.getByRole("button", { name: "Next step" }).click();
+  await page.waitForTimeout(200);
+  await shoot(page, "replay-step-3");
+
+  await slider.fill("6");
+  await page.waitForTimeout(200);
+  await shoot(page, "replay-step-7");
+
+  // Autoplay walks forward on its own at about two steps a second.
+  await slider.fill("0");
+  await page.getByRole("button", { name: "Replay steps" }).click();
+  await page.waitForTimeout(1100);
+  await shoot(page, "replay-autoplay");
+  await page.getByRole("button", { name: "Pause replay" }).click();
+
+  await page.getByRole("button", { name: "Live", exact: true }).click();
+  await page.waitForTimeout(200);
+  await shoot(page, "replay-back-to-live");
+  await page.context().close();
+
+  const dark = await openPage(browser, { theme: "dark" });
+  await selectNewest(dark);
+  await dark.getByRole("button", { name: /Completing task/ }).waitFor({ timeout: 30_000 });
+  await dark.getByLabel("Step", { exact: true }).fill("2");
+  await dark.waitForTimeout(200);
+  await shoot(dark, "replay-dark");
+  await dark.context().close();
+};
+
 export const scenes: Record<string, Scene> = {
   shell,
   sessions,
@@ -252,4 +298,5 @@ export const scenes: Record<string, Scene> = {
   terminal,
   renderers,
   plan,
+  replay,
 };

@@ -4,6 +4,7 @@ import { ChecklistView } from "./renderers/ChecklistView";
 import { EditorView } from "./renderers/EditorView";
 import { PlanProgress } from "./PlanProgress";
 import { ReaderView } from "./renderers/ReaderView";
+import { StepScrubber } from "./StepScrubber";
 import { TerminalView } from "./renderers/TerminalView";
 import { Frame, Mono } from "./renderers/shared";
 import { cx } from "../lib/ui";
@@ -12,11 +13,19 @@ import type { Step } from "../lib/useSession";
 
 type Props = {
   step: Step | null;
+  /** Every step of the session, for the footer's scrubber. */
+  steps: Step[];
+  activeStep: number | null;
+  onSelectStep: (step: number) => void;
   /** Latest todo.md, for the footer's progress widget. */
   plan: string | null;
   /** True while the panel is pinned to whatever opposable is doing now. */
   live: boolean;
   onGoLive: () => void;
+  /** A finished session can be replayed; a running one only followed. */
+  replayable: boolean;
+  playing: boolean;
+  onSetPlaying: (playing: boolean) => void;
   onClose: () => void;
   raw: boolean;
   onToggleRaw: () => void;
@@ -26,9 +35,15 @@ type Props = {
  *  picked out of the chat. The body switches renderer by tool prefix. */
 export function ComputerPanel({
   step,
+  steps,
+  activeStep,
+  onSelectStep,
   plan,
   live,
   onGoLive,
+  replayable,
+  playing,
+  onSetPlaying,
   onClose,
   raw,
   onToggleRaw,
@@ -75,26 +90,6 @@ export function ComputerPanel({
             Raw
           </button>
         )}
-        <button
-          type="button"
-          onClick={onGoLive}
-          disabled={live}
-          title={live ? "Following the newest step" : "Jump back to the newest step"}
-          className={cx(
-            "flex shrink-0 items-center gap-1.5 rounded-xl border px-2 py-1 text-[11.5px] transition-colors",
-            live
-              ? "border-ok/40 bg-ok-soft text-ok"
-              : "border-line text-muted hover:border-line-strong",
-          )}
-        >
-          <span
-            className={cx(
-              "block h-1.5 w-1.5 rounded-full border border-current",
-              live && "pulse bg-current",
-            )}
-          />
-          Live
-        </button>
         <IconButton label="Hide computer panel" onClick={onClose}>
           <PanelRight />
         </IconButton>
@@ -114,7 +109,17 @@ export function ComputerPanel({
         )}
       </div>
 
-      <footer className="flex h-12 shrink-0 items-center justify-end gap-3 border-t border-line px-4">
+      <footer className="flex h-12 shrink-0 items-center gap-3 border-t border-line px-3">
+        <StepScrubber
+          steps={steps}
+          activeStep={activeStep}
+          onSelect={onSelectStep}
+          live={live}
+          onGoLive={onGoLive}
+          replayable={replayable}
+          playing={playing}
+          onSetPlaying={onSetPlaying}
+        />
         <PlanProgress plan={plan} />
       </footer>
     </aside>

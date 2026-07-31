@@ -29,10 +29,13 @@ export function ActionChip({ step, active, onClick }: Props) {
       className={cx(
         "flex max-w-full items-center gap-2 rounded-xl border px-2.5 py-1.5 text-left text-[12.5px] transition-colors",
         onClick && "cursor-pointer",
+        // One branch, not overlapping utilities: two `bg-*` classes on the
+        // same element would be settled by stylesheet order, not by intent.
         failed
           ? "border-warn/40 bg-warn-soft text-fg"
-          : "border-line bg-panel text-muted hover:border-line-strong",
-        active && !failed && "border-accent/60 bg-accent-soft",
+          : active
+            ? "border-accent/60 bg-accent-soft text-fg"
+            : "border-line bg-panel text-muted hover:border-line-strong",
         running && "pulse",
       )}
     >

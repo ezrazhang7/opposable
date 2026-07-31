@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ChatStream } from "./components/ChatStream";
 import { ComputerPanel } from "./components/ComputerPanel";
 import { Home } from "./components/Home";
@@ -22,6 +22,7 @@ export default function App() {
   const [pickedStep, setPickedStep] = useState<number | null>(null);
   const [live, setLive] = useState(true);
   const [raw, setRaw] = useState(false);
+  const [playing, setPlaying] = useState(false);
 
   const { tasks, error, refresh } = useTasks();
   const selected = tasks.find((t) => t.id === selectedId) ?? null;
@@ -32,16 +33,17 @@ export default function App() {
     setPickedStep(null);
     setLive(true);
     setRaw(false);
+    setPlaying(false);
   }, [selectedId]);
 
   const newestStep = session.steps.length ? session.steps[session.steps.length - 1].step : null;
   const activeStep = live ? newestStep : pickedStep;
   const shownStep = session.steps.find((s) => s.step === activeStep) ?? null;
 
-  const selectStep = (step: number) => {
+  const selectStep = useCallback((step: number) => {
     setPickedStep(step);
     setLive(false);
-  };
+  }, []);
 
   const startTask = async (task: string) => {
     const created = await api.createTask({ task, ...taskParams(settings) });
@@ -112,9 +114,18 @@ export default function App() {
         {panelOpen && (
           <ComputerPanel
             step={shownStep}
+            steps={session.steps}
+            activeStep={activeStep}
+            onSelectStep={selectStep}
             plan={session.plan}
             live={live}
-            onGoLive={() => setLive(true)}
+            onGoLive={() => {
+              setLive(true);
+              setPlaying(false);
+            }}
+            replayable={status !== "running"}
+            playing={playing}
+            onSetPlaying={setPlaying}
             onClose={() => setPanelOpen(false)}
             raw={raw}
             onToggleRaw={() => setRaw((v) => !v)}
