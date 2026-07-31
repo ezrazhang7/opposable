@@ -140,6 +140,21 @@ npm --prefix web run e2e
 
 ## Safety
 
-A general agent with a shell is a chainsaw. Defaults are conservative — `LocalSandbox` confines the working directory but shares your host; use `--sandbox docker` for anything you wouldn't run by hand. You are responsible for what your agent does.
+A general agent with a shell is a chainsaw.
+
+- **`LocalSandbox`** confines file access to its working directory — absolute paths are reinterpreted as root-relative and anything escaping the root is refused — but commands still run on your host, as you. Use it when you trust the task.
+- **`--sandbox docker`** is the real boundary for anything you wouldn't run by hand: capabilities dropped, no privilege escalation, 2 vCPU / 4 GiB with swap off, 512 pids, read-only root, unprivileged uid. That hardened default cannot `apt-get install` — package installation needs root and a writable filesystem — so `OPPOSABLE_DOCKER_PROFILE=permissive` keeps the resource ceilings and gives the container root back.
+- **Nothing from your environment crosses into a sandbox.** The env is built from an allowlist, so a task cannot read your API key out of its own shell.
+- **`web_fetch` is under egress policy**: no private, loopback, link-local or metadata addresses, redirects re-checked on every hop, non-HTTP schemes refused.
+
+Neither backend is safe for strangers — a container shares one kernel with every other tenant. Public hosting runs a microVM behind the same interface and refuses to start on these two; see [docs/HOSTED_PRD.md](docs/HOSTED_PRD.md).
+
+You are responsible for what your agent does.
+
+## Hosting it for other people
+
+`OPPOSABLE_HOSTED=1` switches on the multi-tenant rules: accounts and tenant-scoped tasks, session-bound SSE, files served from a separate origin, BYOK keys in a secret manager, per-org quotas, and an audit log. It also makes `opposable serve` **refuse to start** until every ship-blocker is configured — run it once and it lists what is missing.
+
+The plan, the decisions behind it, and what is still blocked on an account or a purchase: [docs/HOSTED_PRD.md](docs/HOSTED_PRD.md), [docs/TODO-hosted.md](docs/TODO-hosted.md), [docs/plan-stage0.md](docs/plan-stage0.md).
 
 MIT.
