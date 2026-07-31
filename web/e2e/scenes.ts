@@ -207,6 +207,43 @@ const renderers: Scene = async (browser) => {
   }
 };
 
+/** Plan progress: the counter tracks todo.md as the agent checks items off. */
+const plan: Scene = async (browser) => {
+  const task = await createTask(
+    "Research the Voyager program and write a briefing with sources.",
+  );
+
+  const page = await openPage(browser, { theme: "light" });
+  await selectNewest(page);
+
+  // First plan_update: nothing checked off yet.
+  await page.getByRole("button", { name: /Task progress 0\/5/ }).waitFor({ timeout: 30_000 });
+  await shoot(page, "plan-early");
+
+  await waitForStatus(task.id, "complete");
+  await page.getByRole("button", { name: /Task progress 5\/5/ }).waitFor();
+  await shoot(page, "plan-complete");
+
+  await page.getByRole("button", { name: /Task progress/ }).click();
+  await page.waitForTimeout(200);
+  await shoot(page, "plan-checklist");
+  await page.keyboard.press("Escape");
+
+  // The plan_ renderer shows the todo.md of the step you pick.
+  await page.getByRole("button", { name: /Updating plan/ }).first().click();
+  await page.waitForTimeout(200);
+  await shoot(page, "plan-renderer");
+  await page.context().close();
+
+  const dark = await openPage(browser, { theme: "dark" });
+  await selectNewest(dark);
+  await dark.getByRole("button", { name: /Task progress 5\/5/ }).waitFor({ timeout: 30_000 });
+  await dark.getByRole("button", { name: /Task progress/ }).click();
+  await dark.waitForTimeout(200);
+  await shoot(dark, "plan-checklist-dark");
+  await dark.context().close();
+};
+
 export const scenes: Record<string, Scene> = {
   shell,
   sessions,
@@ -214,4 +251,5 @@ export const scenes: Record<string, Scene> = {
   chat,
   terminal,
   renderers,
+  plan,
 };

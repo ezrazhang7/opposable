@@ -1,6 +1,8 @@
 import { PanelRight, Terminal } from "./Icons";
 import { IconButton } from "./IconButton";
+import { ChecklistView } from "./renderers/ChecklistView";
 import { EditorView } from "./renderers/EditorView";
+import { PlanProgress } from "./PlanProgress";
 import { ReaderView } from "./renderers/ReaderView";
 import { TerminalView } from "./renderers/TerminalView";
 import { Frame, Mono } from "./renderers/shared";
@@ -10,6 +12,8 @@ import type { Step } from "../lib/useSession";
 
 type Props = {
   step: Step | null;
+  /** Latest todo.md, for the footer's progress widget. */
+  plan: string | null;
   /** True while the panel is pinned to whatever opposable is doing now. */
   live: boolean;
   onGoLive: () => void;
@@ -20,7 +24,15 @@ type Props = {
 
 /** "opposable's computer": what the agent is doing right now, or the step you
  *  picked out of the chat. The body switches renderer by tool prefix. */
-export function ComputerPanel({ step, live, onGoLive, onClose, raw, onToggleRaw }: Props) {
+export function ComputerPanel({
+  step,
+  plan,
+  live,
+  onGoLive,
+  onClose,
+  raw,
+  onToggleRaw,
+}: Props) {
   const kind = step ? toolKind(step.name) : "unknown";
   const Icon = step ? KIND_ICON[kind] : Terminal;
   const subtitle = step ? toolArg(step.name, step.args) || toolVerb(step.name) : "idle";
@@ -102,7 +114,9 @@ export function ComputerPanel({ step, live, onGoLive, onClose, raw, onToggleRaw 
         )}
       </div>
 
-      <footer className="h-12 shrink-0 border-t border-line px-4" />
+      <footer className="flex h-12 shrink-0 items-center justify-end gap-3 border-t border-line px-4">
+        <PlanProgress plan={plan} />
+      </footer>
     </aside>
   );
 }
@@ -115,6 +129,8 @@ function StepBody({ step }: { step: Step }) {
       return <EditorView step={step} />;
     case "reader":
       return <ReaderView step={step} />;
+    case "checklist":
+      return <ChecklistView step={step} />;
     default:
       return (
         <Frame bar={<span className="font-mono text-faint">{step.name}</span>}>

@@ -112,6 +112,7 @@ export default function App() {
         {panelOpen && (
           <ComputerPanel
             step={shownStep}
+            plan={session.plan}
             live={live}
             onGoLive={() => setLive(true)}
             onClose={() => setPanelOpen(false)}
