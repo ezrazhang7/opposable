@@ -81,7 +81,14 @@ class Agent:
         self.state_dir = Path(state_dir) if state_dir else None
         self.on_event = on_event or (lambda kind, payload: None)
         self._spill_count = 0
+        self._step = 0  # monotonically increasing tool-call index
         self.usage: dict[str, int] = {}
+        # Set from another thread (e.g. the web server) to stop cooperatively;
+        # checked once per iteration, state is saved before returning.
+        self.stop_requested = False
+        # Follow-up guidance appended from another thread; drained into the
+        # ledger as user events at the top of each iteration.
+        self.inbox: list[str] = []
 
     # ------------------------------------------------------------------ state
 
@@ -130,6 +137,20 @@ class Agent:
 
     # ------------------------------------------------------------------- loop
 
+    def _finish(self, result: RunResult) -> RunResult:
+        self.save_state()
+        self.on_event(
+            "done",
+            {
+                "completed": result.completed,
+                "summary": result.summary,
+                "iterations": result.iterations,
+                "deliverables": result.deliverables,
+                "usage": dict(self.usage),
+            },
+        )
+        return result
+
     def run(self, task: str) -> RunResult:
         resumed = bool(self.ledger.events)
         if not resumed:
@@ -141,6 +162,11 @@ class Agent:
         )
 
         for iteration in range(1, self.max_iterations + 1):
+            if self.stop_requested:
+                return self._finish(RunResult(False, "stopped by user", iteration - 1))
+            while self.inbox:
+                self.ledger.append(Event(role="user", content=self.inbox.pop(0)))
+
             evicted = self.ledger.compress(self._spill)
             if evicted:
                 self.on_event("compress", {"evicted": evicted})
@@ -169,15 +195,20 @@ class Agent:
             if not turn.tool_calls:
                 # Model chose to stop talking instead of acting; treat its
                 # text as the outcome.
-                self.save_state()
-                return RunResult(False, turn.text or "(no action)", iteration)
+                return self._finish(RunResult(False, turn.text or "(no action)", iteration))
 
             done_summary: str | None = None
             deliverables: list[str] = []
             for call in turn.tool_calls:
-                self.on_event("tool", {"name": call.name, "args": call.args})
+                self._step += 1
+                self.on_event("tool", {"name": call.name, "args": call.args, "step": self._step})
                 observation, done = self.runtime.execute(call.name, call.args)
-                self.on_event("observation", {"name": call.name, "text": observation[:500]})
+                self.on_event(
+                    "observation",
+                    {"name": call.name, "text": observation, "step": self._step},
+                )
+                if call.name == "plan_update" and self.runtime.plan is not None:
+                    self.on_event("plan", {"plan": self.runtime.plan})
                 self.ledger.append(
                     Event(
                         role="tool",
@@ -192,7 +223,7 @@ class Agent:
 
             self.save_state()
             if done_summary is not None:
-                return RunResult(True, done_summary, iteration, deliverables)
+                return self._finish(RunResult(True, done_summary, iteration, deliverables))
             time.sleep(0)  # yield point for embedding hosts
 
-        return RunResult(False, "max iterations reached", self.max_iterations)
+        return self._finish(RunResult(False, "max iterations reached", self.max_iterations))

@@ -62,6 +62,9 @@ def main(argv: list[str] | None = None) -> int:
 
     run = sub.add_parser("run", help="run a task from scratch")
     run.add_argument("task")
+    srv = sub.add_parser("serve", help="serve the web UI + API")
+    srv.add_argument("--port", type=int, default=8734)
+    srv.add_argument("--dir", default=None, help="base directory for task sandboxes (default: cwd)")
     resume = sub.add_parser("resume", help="resume a previous task directory")
     resume.add_argument("workdir")
     resume.add_argument("task", nargs="?", default="Continue the task. Re-read todo.md and finish remaining steps.")
@@ -75,6 +78,18 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--budget-tokens", type=int, default=60_000)
 
     args = parser.parse_args(argv)
+
+    if args.cmd == "serve":
+        from .server import serve
+
+        httpd = serve(port=args.port, base_dir=args.dir)
+        print(f"{BOLD}opposable{RESET} serving on {CYAN}http://127.0.0.1:{args.port}{RESET}")
+        print(f"{DIM}task sandboxes under: {httpd.manager.base_dir}{RESET}")
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print(f"\n{YELLOW}server stopped{RESET}")
+        return 0
 
     if args.cmd == "resume":
         sandbox = LocalSandbox(root=args.workdir)
