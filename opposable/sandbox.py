@@ -24,6 +24,31 @@ from functools import lru_cache
 from pathlib import Path
 
 
+# Everything a sandbox is allowed to inherit from the host. An allowlist, not
+# a blocklist: `{**os.environ}` handed every task the platform's API keys, so
+# `echo $ANTHROPIC_API_KEY` was a working exfiltration primitive.
+SANDBOX_ENV_ALLOWLIST = ("PATH", "HOME", "LANG", "TERM")
+
+# Windows needs these for a subprocess to start at all (Git Bash resolves its
+# own root from SYSTEMROOT/COMSPEC). They are paths, not credentials.
+_WINDOWS_ENV_ALLOWLIST = (
+    "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP",
+    "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+)
+
+
+def sandbox_env(kind: str, extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Build a sandbox's environment from the allowlist and nothing else."""
+    names = SANDBOX_ENV_ALLOWLIST
+    if os.name == "nt":
+        names += _WINDOWS_ENV_ALLOWLIST
+    env = {name: os.environ[name] for name in names if name in os.environ}
+    env["OPPOSABLE_SANDBOX"] = kind
+    if extra:
+        env.update(extra)
+    return env
+
+
 @lru_cache(maxsize=1)
 def _bash_path() -> str:
     """Locate bash, including Git Bash on Windows hosts where it isn't on PATH."""
@@ -78,7 +103,7 @@ class LocalSandbox(Sandbox):
                 encoding="utf-8",
                 errors="replace",
                 timeout=timeout,
-                env={**os.environ, "OPPOSABLE_SANDBOX": "local"},
+                env=sandbox_env("local"),
             )
             return proc.returncode, proc.stdout, proc.stderr
         except subprocess.TimeoutExpired:

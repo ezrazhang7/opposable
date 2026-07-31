@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from . import config
 from .loop import Agent, RunResult
 from .providers import AnthropicProvider, OpenAICompatProvider, Provider
 from .sandbox import DockerSandbox, LocalSandbox
@@ -52,6 +53,18 @@ npm --prefix web run build</pre>
 """
 
 RESUME_TASK = "Continue the task. Re-read todo.md and finish remaining steps."
+
+
+def _check_params(params: dict) -> None:
+    """Every client-supplied value that picks a destination or an image is
+    allowlisted. `base_url` in particular decides who receives our
+    ``Authorization: Bearer`` header (HOSTED_PRD §2 finding 3)."""
+    config.check_param("model", params.get("model"), config.allowed_models())
+    config.check_param("base_url", params.get("base_url"), config.allowed_base_urls())
+    config.check_param("image", params.get("image"), config.allowed_images())
+    sandbox = params.get("sandbox")
+    if sandbox not in (None, "", "local", "docker"):
+        raise config.ConfigError(f"sandbox {sandbox!r} is not permitted")
 
 
 def default_provider_factory(params: dict) -> Provider:
@@ -343,6 +356,10 @@ class Handler(BaseHTTPRequestHandler):
                 for k in ("model", "base_url", "sandbox", "image", "max_iterations", "budget_tokens")
                 if body.get(k) not in (None, "")
             }
+            try:
+                _check_params(params)
+            except config.ConfigError as exc:
+                return self._error(400, str(exc))
             try:
                 handle = self.manager.create(task, params)
             except Exception as exc:  # noqa: BLE001 — e.g. missing API key
