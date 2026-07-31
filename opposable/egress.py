@@ -86,20 +86,57 @@ def _unwrap(addr: ipaddress.IPv4Address | ipaddress.IPv6Address):
     return None
 
 
-def check_address(ip: str) -> None:
-    """Refuse anything that is not a public unicast address."""
+def allowed_ports() -> tuple[int, ...] | None:
+    """Ports ``web_fetch`` may reach, or ``None`` for "any but SMTP".
+
+    Multi-tenant deployments get a tight allowlist as defence in depth
+    against protocol smuggling into services that speak something other than
+    HTTP. A single-operator install gets any port, because plenty of ordinary
+    sites and dev servers listen on odd ones and the address check is already
+    the control that matters.
+    """
+    raw = os.environ.get("OPPOSABLE_ALLOWED_PORTS", "").strip()
+    if raw:
+        return tuple(int(p.strip()) for p in raw.split(",") if p.strip())
+    return None if private_addresses_allowed() else DEFAULT_ALLOWED_PORTS
+
+
+def private_addresses_allowed() -> bool:
+    """Whether loopback and RFC1918 are reachable.
+
+    On a single-operator install they are, and blocking them would be
+    security theatre: the agent has a shell on that host and can curl
+    anything this refuses. The moment there is more than one tenant they are
+    someone else's machines, and the answer flips.
+
+    Link-local is **not** covered by this — see :func:`check_address`.
+    """
+    from . import config
+
+    return not (config.hosted() or config.auth_enabled())
+
+
+def check_address(ip: str, allow_private: bool | None = None) -> None:
+    """Refuse anything the caller has no business reaching."""
+    if allow_private is None:
+        allow_private = private_addresses_allowed()
     addr = ipaddress.ip_address(ip)
     for candidate in (addr, _unwrap(addr)):
         if candidate is None:
             continue
-        if (
-            candidate.is_private
-            or candidate.is_loopback
-            or candidate.is_link_local
+        local = candidate.is_loopback or candidate.is_private
+        # Never, on any deployment. There is no legitimate reason for an
+        # agent to fetch the metadata service, and it is the single most
+        # valuable thing on the network to whoever is injecting the prompt.
+        # `is_reserved` is qualified because ::1 sits inside ::/8 and would
+        # otherwise be unreachable even on a laptop.
+        always_denied = (
+            candidate.is_link_local
             or candidate.is_multicast
-            or candidate.is_reserved
             or candidate.is_unspecified
-        ):
+            or (candidate.is_reserved and not local)
+        )
+        if always_denied or (local and not allow_private):
             raise EgressDenied(f"{ip} resolves into non-public address space ({candidate})")
         for network in denied_cidrs():
             if candidate.version == network.version and candidate in network:
@@ -133,9 +170,10 @@ def resolve(hostname: str, port: int) -> list[str]:
     except socket.gaierror as exc:
         raise EgressDenied(f"cannot resolve {hostname}: {exc}") from exc
     addresses = []
+    allow_private = private_addresses_allowed()
     for info in infos:
         ip = info[4][0]
-        check_address(ip)
+        check_address(ip, allow_private)
         if ip not in addresses:
             addresses.append(ip)
     if not addresses:
@@ -153,8 +191,8 @@ def check_url(url: str) -> tuple[str, str, int, str]:
     port = parts.port or (443 if parts.scheme == "https" else 80)
     if port in SMTP_PORTS:
         raise EgressDenied(f"port {port} is permanently blocked")
-    allowed_ports = DEFAULT_ALLOWED_PORTS
-    if port not in allowed_ports:
+    allowed = allowed_ports()
+    if allowed is not None and port not in allowed:
         raise EgressDenied(f"port {port} is not permitted")
     check_host(parts.hostname)
     target = urlunsplit(("", "", parts.path or "/", parts.query, ""))

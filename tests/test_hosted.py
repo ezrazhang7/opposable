@@ -907,18 +907,34 @@ def test_hosted_preflight_wants_a_separate_registrable_domain(hosted, monkeypatc
         "::ffff:169.254.169.254",  # ...wearing an IPv6 hat
         "2002:a9fe:a9fe::",     # ...via 6to4
         "64:ff9b::a9fe:a9fe",   # ...via NAT64
-        "127.0.0.1",
-        "::1",
-        "10.0.0.5",
-        "172.16.4.4",
-        "192.168.1.1",
-        "fd00::1",              # IPv6 unique-local
+        "fe80::1",              # IPv6 link-local
+        "224.0.0.1",            # multicast
         "0.0.0.0",
     ],
 )
-def test_non_public_addresses_are_refused(ip):
+def test_link_local_is_refused_on_every_deployment(ip):
+    """No deployment, however single-user, has a reason to fetch the metadata
+    service — and it is the most valuable thing on the network to whoever is
+    injecting the prompt."""
     with pytest.raises(egress.EgressDenied):
         egress.check_address(ip)
+
+
+PRIVATE_ADDRESSES = ["127.0.0.1", "::1", "10.0.0.5", "172.16.4.4", "192.168.1.1", "fd00::1"]
+
+
+@pytest.mark.parametrize("ip", PRIVATE_ADDRESSES)
+def test_private_addresses_are_refused_once_there_is_a_second_tenant(ip, multi_user):
+    with pytest.raises(egress.EgressDenied):
+        egress.check_address(ip)
+
+
+@pytest.mark.parametrize("ip", PRIVATE_ADDRESSES)
+def test_a_single_operator_may_still_reach_their_own_network(ip):
+    """Blocking these on a laptop is theatre: the agent has a shell on that
+    host and can curl anything this would refuse."""
+    assert not config.auth_enabled()
+    egress.check_address(ip)
 
 
 def test_public_addresses_pass():
@@ -936,12 +952,24 @@ def test_our_own_network_is_refused(monkeypatch):
     egress.check_address("1.1.1.1")
 
 
-def test_smtp_and_odd_ports_are_refused():
+def test_smtp_is_refused_on_every_deployment():
+    """Every major cloud blocks these permanently and never lifts it for free
+    tiers; we are not going to be the open relay that does."""
     for port in (25, 465, 587):
         with pytest.raises(egress.EgressDenied, match="permanently blocked"):
             egress.check_url(f"http://example.com:{port}/")
+
+
+def test_odd_ports_are_refused_once_there_is_a_second_tenant(multi_user):
     with pytest.raises(egress.EgressDenied, match="not permitted"):
         egress.check_url("http://example.com:6379/")
+    egress.check_url("https://example.com/")
+
+
+def test_a_single_operator_may_use_any_non_smtp_port():
+    """Dev servers and plenty of ordinary sites listen on odd ports, and the
+    address check is already the control that matters."""
+    egress.check_url("http://example.com:8902/voyager")
 
 
 def test_non_http_schemes_are_refused():
@@ -974,6 +1002,18 @@ def test_rebinding_answer_set_is_refused_wholesale(monkeypatch):
         return [
             (2, 1, 6, "", ("93.184.216.34", port)),
             (2, 1, 6, "", ("169.254.169.254", port)),
+        ]
+
+    monkeypatch.setattr(egress.socket, "getaddrinfo", fake_getaddrinfo)
+    with pytest.raises(egress.EgressDenied, match="non-public"):
+        egress.resolve("rebind.test", 80)
+
+
+def test_rebinding_answer_set_is_refused_for_a_tenant(monkeypatch, multi_user):
+    def fake_getaddrinfo(host, port, **kw):
+        return [
+            (2, 1, 6, "", ("93.184.216.34", port)),
+            (2, 1, 6, "", ("10.0.0.5", port)),
         ]
 
     monkeypatch.setattr(egress.socket, "getaddrinfo", fake_getaddrinfo)

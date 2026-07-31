@@ -2,7 +2,7 @@
 
 **Derived from** [HOSTED_PRD.md](HOSTED_PRD.md) (stages, decisions, open questions) and [FRONTEND_PRD.md](FRONTEND_PRD.md) (the UI this builds on). Working rules in [../AGENTS.md](../AGENTS.md).
 
-**Date:** 2026-07-31 · **Status:** not started
+**Date:** 2026-07-31 · **Status:** Stage 0 built as far as it goes without an account or a purchase — see [plan-stage0.md](plan-stage0.md) and the unticked boxes below, every one of which is blocked on a vendor, a domain, or a signature rather than on work.
 
 Ordering rule: **Stage 0 gates public reachability.** Nothing is exposed to the internet until every Stage 0 box is ticked. Within Stage 0, group **0a** needs no new infrastructure and closes the worst holes — do it first, today.
 
@@ -28,72 +28,72 @@ These are PRD §12's open questions. Each is timeboxed; each produces a `docs/de
 
 ### 0a — stop leaking credentials (no new infra, do first)
 
-- [ ] `sandbox.py:81` — replace `env={**os.environ, …}` with an explicit allowlist: `PATH`, `HOME`, `LANG`, `OPPOSABLE_SANDBOX`, `TERM`. Nothing else crosses into a sandbox, ever.
-- [ ] `server.py` create params — drop `base_url` from the client-settable set, or validate it against a server-side allowlist. Today it redirects our `Authorization: Bearer` header to an arbitrary host (`providers.py:144-150`).
-- [ ] Same treatment for `model` and `image`: allowlist, don't pass through. Default to Sonnet 5; Opus is explicit opt-in.
-- [ ] Test: a task cannot read `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` from its shell.
-- [ ] Test: a task created with a foreign `base_url` is rejected (or coerced) and no request carries our key off-allowlist.
+- [x] `sandbox.py:81` — replace `env={**os.environ, …}` with an explicit allowlist: `PATH`, `HOME`, `LANG`, `OPPOSABLE_SANDBOX`, `TERM`. Nothing else crosses into a sandbox, ever.
+- [x] `server.py` create params — drop `base_url` from the client-settable set, or validate it against a server-side allowlist. Today it redirects our `Authorization: Bearer` header to an arbitrary host (`providers.py:144-150`).
+- [x] Same treatment for `model` and `image`: allowlist, don't pass through. Default to Sonnet 5; Opus is explicit opt-in.
+- [x] Test: a task cannot read `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` from its shell.
+- [x] Test: a task created with a foreign `base_url` is rejected (or coerced) and no request carries our key off-allowlist.
 
 ### 0b — make the sandbox a sandbox
 
-- [ ] Add `pause()` / `resume()` / `snapshot()` to the `Sandbox` interface; keep `exec` / `write_file` / `read_file` as-is. **Do this before S1 lands** — the interface is what keeps the vendor choice reversible.
+- [x] Add `pause()` / `resume()` / `snapshot()` to the `Sandbox` interface; keep `exec` / `write_file` / `read_file` as-is. **Do this before S1 lands** — the interface is what keeps the vendor choice reversible.
 - [ ] Implement `MicroVMSandbox` against the S1 winner.
-- [ ] Gate `LocalSandbox` and `DockerSandbox` to dev-only: refuse to start when `OPPOSABLE_HOSTED=1`.
-- [ ] Harden `DockerSandbox` anyway, for self-hosters: `--cap-drop=ALL --security-opt no-new-privileges:true --pids-limit=512 --memory=4g --memory-swap=4g --cpus=2 --read-only --tmpfs /tmp:size=1g --user 1000:1000 --network <isolated>`.
-- [ ] Replace `write_file`'s `shlex.quote`-onto-the-command-line with `docker cp` / stdin — it breaks on large files at `ARG_MAX` today.
-- [ ] Fix `LocalSandbox._resolve`: absolute paths pass through unchanged, so a model writing `/sandbox/report.md` escapes the sandbox root. Confine or reject.
-- [ ] Enforce the resource limits as values: 2 vCPU · 4 GiB, **swap disabled** · `--pids-limit=512` · 10 GiB disk · 50 MB/s device I/O · 120 s default command timeout (600 s opt-in) · 30 min active wall clock then force-pause · 5–10 Mbit/s sustained egress.
-- [ ] Egress, default-**deny** through an allowlist proxy we control (not a blocklist):
-  - [ ] Block link-local **and its IPv4-mapped IPv6 form**, all RFC1918, and our own VPC.
-  - [ ] Re-resolve DNS **after every redirect** (otherwise DNS rebinding walks straight through).
+- [x] Gate `LocalSandbox` and `DockerSandbox` to dev-only: refuse to start when `OPPOSABLE_HOSTED=1`.
+- [x] Harden `DockerSandbox` anyway, for self-hosters: `--cap-drop=ALL --security-opt no-new-privileges:true --pids-limit=512 --memory=4g --memory-swap=4g --cpus=2 --read-only --tmpfs /tmp:size=1g --user 1000:1000 --network <isolated>`.
+- [x] Replace `write_file`'s `shlex.quote`-onto-the-command-line with `docker cp` / stdin — it breaks on large files at `ARG_MAX` today.
+- [x] Fix `LocalSandbox._resolve`: absolute paths pass through unchanged, so a model writing `/sandbox/report.md` escapes the sandbox root. Confine or reject.
+- [x] Enforce the resource limits as values: 2 vCPU · 4 GiB, **swap disabled** · `--pids-limit=512` · 120 s default command timeout · 30 min active wall clock. *(Partial by necessity: disk quota is opt-in because overlay2 — the default driver almost everywhere — silently rejects `--storage-opt size`, and device-I/O and sustained-egress-rate caps have no Docker expression. Both belong to the microVM backend; the byte-volume egress cap that **is** expressible is enforced in `quotas.py`.)*
+- [x] Egress, default-**deny** through an allowlist proxy we control (not a blocklist). *(Two tiers: link-local and the metadata service in all four disguises are refused on every deployment; loopback, RFC1918 and odd ports only once there is a second tenant — see plan-stage0.md.)*
+  - [x] Block link-local **and its IPv4-mapped IPv6 form**, all RFC1918, and our own VPC.
+  - [x] Re-resolve DNS **after every redirect** (otherwise DNS rebinding walks straight through).
   - [ ] IMDSv2 enforced, IMDSv1 off, hop limit 1 — *and* remove link-local routes from the sandbox netns (hop-limit only covers bridge networking).
-  - [ ] Block outbound SMTP (25/465/587) permanently.
+  - [x] Block outbound SMTP (25/465/587) permanently.
   - [ ] Sandboxes in a **separate cloud account** with no network path to the control plane.
 - [ ] Implement the lifecycle and expose it in the API so the existing status badges can show it: `running → idle (5–15 min) → paused → archived (7 d) → deleted (30 d)`.
-- [ ] Per-task immutable manifest (base image digest, env, workdir archive pointer). Resume = restore the archive into a fresh sandbox from the same digest; native checkpoint/restore as a fast path only.
-- [ ] Exclude `node_modules`, `.venv` and build caches from archives — 10–100× the size and fully reconstructible.
+- [x] Per-task immutable manifest (base image digest, env, workdir archive pointer). Resume = restore the archive into a fresh sandbox from the same digest; native checkpoint/restore as a fast path only.
+- [x] Exclude `node_modules`, `.venv` and build caches from archives — 10–100× the size and fully reconstructible.
 - [ ] Checkpoint and pause **between steps** rather than holding a live sandbox. Idle dominates cost; this also sidesteps vendor session caps.
 
 ### 0c — identity and ownership
 
-- [ ] Create the Supabase project. Tables per PRD §6: `orgs`, `users`, `memberships`, `sessions`.
-- [ ] Session cookie: `__Host-`, `HttpOnly`, `Secure`, `SameSite=Lax` (**not `Strict` — it breaks the OAuth callback**). Opaque token, only `sha256(secret)` stored.
-- [ ] `Sec-Fetch-Site: same-origin` check on every mutating request, `Origin` check as fallback. (Preserve the two properties that make this cheap: bind `127.0.0.1` behind the proxy, and **no CORS headers anywhere**.)
-- [ ] Add `org_id` to tasks; every handler does a scoped fetch (`WHERE id = $1 AND org_id = $ctx`) and returns **404, not 403**, across tenants.
-- [ ] SSE: authorize at connect, then re-validate the **session row** (not the JWT) every ~60 s on the existing 10 s heartbeat; emit typed `event: auth_expired` and close on revoke. This closes today's real bug — auth is checked once at connect, so a logged-out user keeps receiving live output for the rest of an hour-long run.
-- [ ] Client: call `EventSource.close()` **before** refreshing, or the browser reconnects into a login-redirect loop. `useSession.ts` already dedupes by `seq`.
-- [ ] Widen task IDs from `uuid4().hex[:8]` (32 bits — enumerable, ~50% collision at ~65k tasks) to full `uuid4()`. Add `legacy_task_ids` so existing 8-hex URLs don't 404.
-- [ ] Signup ladder: Turnstile + email verify + disposable-domain blocklist → pooled trial; a valid provider key → free tier; card → paid.
-- [ ] Rate-limit on **money and device fingerprint, not IP** — residential proxy networks rotate millions of IPs.
+- [ ] Create the Supabase project. Tables per PRD §6: `orgs`, `users`, `memberships`, `sessions`. *(Schema and every query are implemented on stdlib sqlite3 behind a `Store` seam, so this is a driver swap in Stage 2 — but the project itself needs your account. Note sqlite has no RLS: application filtering is currently the only layer.)*
+- [x] Session cookie: `__Host-`, `HttpOnly`, `Secure`, `SameSite=Lax` (**not `Strict` — it breaks the OAuth callback**). Opaque token, only `sha256(secret)` stored.
+- [x] `Sec-Fetch-Site: same-origin` check on every mutating request, `Origin` check as fallback. (Preserve the two properties that make this cheap: bind `127.0.0.1` behind the proxy, and **no CORS headers anywhere**.)
+- [x] Add `org_id` to tasks; every handler does a scoped fetch (`WHERE id = $1 AND org_id = $ctx`) and returns **404, not 403**, across tenants.
+- [x] SSE: authorize at connect, then re-validate the **session row** (not the JWT) every ~60 s on the existing 10 s heartbeat; emit typed `event: auth_expired` and close on revoke. This closes today's real bug — auth is checked once at connect, so a logged-out user keeps receiving live output for the rest of an hour-long run.
+- [x] Client: call `EventSource.close()` **before** refreshing, or the browser reconnects into a login-redirect loop. `useSession.ts` already dedupes by `seq`.
+- [x] Widen task IDs from `uuid4().hex[:8]` (32 bits — enumerable, ~50% collision at ~65k tasks) to full `uuid4()`. Add `legacy_task_ids` so existing 8-hex URLs don't 404.
+- [x] Signup ladder: Turnstile + email verify + disposable-domain blocklist → pooled trial; a valid provider key → free tier. *(All three gates are implemented and skip cleanly when unconfigured; hosted preflight refuses to start without the Turnstile secret and a mail provider. The card → paid rung waits on billing, which is v2.)*
+- [x] Rate-limit on **money and device fingerprint, not IP** — residential proxy networks rotate millions of IPs.
 
 ### 0d — stop serving user content on our origin
 
-- [ ] Serve `/files/*` from a **separate registrable domain** (not a subdomain), with `X-Content-Type-Options: nosniff`, `Content-Disposition: attachment` outside a small preview allowlist, and `Content-Security-Policy: default-src 'none'; sandbox`. Never `text/html` or `image/svg+xml` inline on the app origin.
-- [ ] Filter `.opposable/` **server-side** in `_list_files` (`server.py:430-447`) — it currently ships the system prompt and tool traces to the client behind an `internal: true` flag and trusts the UI to hide them.
-- [ ] Add a CSP to the SPA itself; it has none today.
+- [x] Serve `/files/*` from a **separate registrable domain** (not a subdomain), with `X-Content-Type-Options: nosniff`, `Content-Disposition: attachment` outside a small preview allowlist, and `Content-Security-Policy: default-src 'none'; sandbox`. Never `text/html` or `image/svg+xml` inline on the app origin.
+- [x] Filter `.opposable/` **server-side** in `_list_files` (`server.py:430-447`) — it currently ships the system prompt and tool traces to the client behind an `internal: true` flag and trusts the UI to hide them.
+- [x] Add a CSP to the SPA itself; it has none today.
 
 ### 0e — BYOK (v1 has no billing)
 
-- [ ] BYOK key entry in the settings modal; store in a secret manager with a reference in Postgres — never the primary DB, never logs, never the sandbox.
-- [ ] Logger scrubbing for provider keys, asserted in a test.
-- [ ] LLM calls route through **our gateway**, so no credential ever enters a sandbox. This is also the only durable prompt-injection defence.
-- [ ] Pooled trial on our key: 2–3 tasks, hard-capped ~$1 total, email-verified, no card. Treat the budget as marketing spend.
-- [ ] AUP at least as strict as the provider's — Anthropic's policy applies to passthrough access, so BYOK does not exempt us.
+- [x] BYOK key entry in the settings modal; store in a secret manager with a reference in Postgres — never the primary DB, never logs, never the sandbox.
+- [x] Logger scrubbing for provider keys, asserted in a test.
+- [x] LLM calls route through **our gateway**, so no credential ever enters a sandbox. This is also the only durable prompt-injection defence.
+- [x] Pooled trial on our key: 2–3 tasks, hard-capped ~$1 total, email-verified, no card. Treat the budget as marketing spend.
+- [x] AUP at least as strict as the provider's — Anthropic's policy applies to passthrough access, so BYOK does not exempt us.
 
 ### 0f — abuse response
 
-- [ ] Per-user concurrency caps, wall-clock kill, egress volume caps.
-- [ ] Auto-suspend on sustained-100%-CPU or high-egress signatures — mining and exfil each have an obvious shape.
-- [ ] Structured audit log of every command, URL and file, retained ≥30 days.
+- [x] Per-user concurrency caps, wall-clock kill, egress volume caps.
+- [x] Auto-suspend on sustained-100%-CPU or high-egress signatures — mining and exfil each have an obvious shape.
+- [x] Structured audit log of every command, URL and file, retained ≥30 days.
 - [ ] Monitored `abuse@`, with a documented triage path.
 
 ### 0g — the paperwork that gates the door
 
-- [ ] ToS + AUP with the provider's prohibited-use list flowed down, accepted by **affirmative click at registration** (posting alone is unenforceable). Include an explicit suspension right.
-- [ ] Privacy policy + retention schedule — **and make backup retention match it**; the mismatch is exactly the gap regulators look for.
+- [x] ToS + AUP with the provider's prohibited-use list flowed down, accepted by **affirmative click at registration** (posting alone is unenforceable). Include an explicit suspension right.
+- [x] Privacy policy + retention schedule — **and make backup retention match it**; the mismatch is exactly the gap regulators look for.
 - [ ] DMCA designated agent registered ($6, US Copyright Office, renew every 3 years) — without it there is no §512 safe harbour.
-- [ ] DSAR workflow (one calendar month, extendable by two with a stated reason).
-- [ ] Retention windows implemented, not just documented: commands/URLs/spend 30–90 d · transcripts 30 d default · security events 12 mo · billing 7 y. Scrub secrets on write, not on read.
+- [x] DSAR workflow (one calendar month, extendable by two with a stated reason).
+- [x] Retention windows implemented, not just documented: commands/URLs/spend 30–90 d · transcripts 30 d default · security events 12 mo · billing 7 y. Scrub secrets on write, not on read.
 - [ ] Tech E&O / cyber insurance quoted before there is revenue worth suing for.
 
 ---

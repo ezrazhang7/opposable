@@ -31,6 +31,16 @@
 
 Each step: `pytest tests/ -q` green, then one commit. Steps 7–9 also run `npm --prefix web run build` and the e2e happy path, since they touch the wire the SPA reads.
 
+## Decisions taken during the build
+
+Recorded because each departs from the plan above in a way a reviewer would otherwise have to reverse-engineer.
+
+1. **Two Docker profiles, not one flag set.** The PRD's hardening list (`--read-only`, `--user 1000:1000`) makes `apt-get install` impossible, and package installation is the README's headline Docker example. `hardened` is the default; `permissive` keeps the resource ceilings, `no-new-privileges` and the network isolation while giving root and a writable filesystem back. Hosted mode uses neither.
+2. **Egress policy has two tiers, split on tenancy rather than on a single flag.** Link-local, multicast and the metadata service in all four of its disguises are refused on every deployment. Loopback, RFC1918 and non-standard ports are refused only once there is a second tenant — blocking them on a laptop is theatre, because the agent has a shell on that host and can reach anything `web_fetch` would refuse. This is also what keeps the e2e fixture (a page server on `127.0.0.1:8902`) working.
+3. **`legacy_task_ids` was not built.** Tasks live in `.opposable-<id>` directories, so the directory name *is* the mapping and an 8-hex URL resolves without a table. Task ids are now validated as hex, which also closed an unlisted traversal: `.opposable-../../etc` walked out of the base directory.
+4. **The theme bootstrap moved out of `index.html`.** It was an inline script, which a CSP without `unsafe-inline` blocks. Weakening `script-src` app-wide to save one request for a twelve-line file was the wrong trade.
+5. **Trial spend is charged after the run, not reserved before it.** Acceptable at three tasks and ~$1. It is explicitly *not* the model for pooled inference in v2, where the reservation has to be atomic and at the gateway — a per-call check never catches an agent making 500 sequential calls.
+
 ## Known blocked-on-you (work around, don't stall)
 
 These need an account, a purchase, or a signature. Everything on our side is built up to the seam and hosted mode refuses to boot without them, so nothing ships half-secured.

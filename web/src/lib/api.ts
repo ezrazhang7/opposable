@@ -74,8 +74,24 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+/** What the server will say about a provider key. Never the key itself —
+ *  there is no use for it here worth the risk of a logged response body. */
+export type KeyStatus = {
+  configured: boolean;
+  provider: string | null;
+  trial_tasks_remaining: number;
+  trial_micros_remaining: number;
+};
+
 export const api = {
   listTasks: () => call<TaskMeta[]>("/api/tasks"),
+  /** Resolves to null on a single-user server, where /api/auth is disabled. */
+  getKeyStatus: () => call<KeyStatus>("/api/auth/keys").catch(() => null),
+  setProviderKey: (provider: string, key: string) =>
+    call<{ configured: boolean }>("/api/auth/keys", {
+      method: "POST",
+      body: JSON.stringify({ provider, key }),
+    }),
   getTask: (id: string) => call<TaskDetail>(`/api/tasks/${id}`),
   createTask: (body: CreateTaskBody) =>
     call<TaskMeta>("/api/tasks", { method: "POST", body: JSON.stringify(body) }),

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { IconButton } from "./IconButton";
 import { X } from "./Icons";
 import { cx } from "../lib/ui";
+import { api, type KeyStatus } from "../lib/api";
 import { DEFAULT_SETTINGS, type Settings } from "../lib/settings";
 
 type Props = {
@@ -82,6 +83,8 @@ export function SettingsModal({ settings, onUpdate, onClose }: Props) {
             </select>
           </Field>
 
+          <ProviderKey />
+
           <div className="grid grid-cols-2 gap-4">
             <Field label="Max iterations" hint="Hard stop for a single run.">
               <input
@@ -130,6 +133,76 @@ export function SettingsModal({ settings, onUpdate, onClose }: Props) {
         </footer>
       </div>
     </div>
+  );
+}
+
+/** Bring-your-own-key, on servers that have accounts. Renders nothing on a
+ *  single-user install, where the key is already in the environment.
+ *
+ *  The field is write-only by design: the server never returns a stored key,
+ *  not even masked. */
+function ProviderKey() {
+  const [status, setStatus] = useState<KeyStatus | null>(null);
+  const [key, setKey] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    api.getKeyStatus().then((s) => alive && setStatus(s));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  if (!status) return null;
+
+  const save = async (value: string) => {
+    setSaving(true);
+    setError(null);
+    try {
+      await api.setProviderKey("anthropic", value);
+      setStatus(await api.getKeyStatus());
+      setKey("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const trial = status.trial_tasks_remaining;
+  return (
+    <Field
+      label="Your provider key"
+      hint={
+        status.configured
+          ? "Stored. Tasks run on your key and your provider bills you directly."
+          : `Tasks run on the free trial until you add one — ${trial} task${trial === 1 ? "" : "s"} left.`
+      }
+    >
+      <div className="flex gap-2">
+        <input
+          type="password"
+          value={key}
+          placeholder={status.configured ? "•••••••• stored" : "sk-ant-…"}
+          onChange={(e) => setKey(e.target.value)}
+          className={inputClass}
+        />
+        <button
+          type="button"
+          disabled={saving || (!key.trim() && !status.configured)}
+          onClick={() => save(key.trim())}
+          className={cx(
+            "h-9 shrink-0 rounded-xl border border-line px-3 text-[12px] text-muted",
+            "transition-colors hover:border-line-strong hover:text-fg disabled:opacity-40",
+          )}
+        >
+          {key.trim() ? "Save" : "Remove"}
+        </button>
+      </div>
+      {error && <span className="mt-1 block text-[11.5px] text-err">{error}</span>}
+    </Field>
   );
 }
 
