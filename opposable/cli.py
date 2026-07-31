@@ -80,9 +80,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.cmd == "serve":
+        from .config import PreflightError
         from .server import serve
 
-        httpd = serve(port=args.port, base_dir=args.dir)
+        try:
+            httpd = serve(port=args.port, base_dir=args.dir)
+        except PreflightError as exc:
+            # Hosted mode fails closed. Say what is missing rather than
+            # tracebacking at whoever is trying to deploy this.
+            print(f"{YELLOW}{exc}{RESET}", file=sys.stderr)
+            print(f"{DIM}see docs/plan-stage0.md and .env.example{RESET}", file=sys.stderr)
+            return 2
         print(f"{BOLD}opposable{RESET} serving on {CYAN}http://127.0.0.1:{args.port}{RESET}")
         print(f"{DIM}task sandboxes under: {httpd.manager.base_dir}{RESET}")
         try:
