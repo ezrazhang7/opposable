@@ -15,8 +15,11 @@ async function json<T>(path: string, init?: RequestInit): Promise<T> {
   return (text ? JSON.parse(text) : {}) as T;
 }
 
-export const createTask = (task: string, model = "demo") =>
-  json<TaskMeta>("/api/tasks", { method: "POST", body: JSON.stringify({ task, model }) });
+export const createTask = (task: string, model = "demo", extra: Record<string, unknown> = {}) =>
+  json<TaskMeta>("/api/tasks", {
+    method: "POST",
+    body: JSON.stringify({ task, model, ...extra }),
+  });
 
 export const getTask = (id: string) => json<TaskMeta>(`/api/tasks/${id}`);
 export const listTasks = () => json<TaskMeta[]>("/api/tasks");

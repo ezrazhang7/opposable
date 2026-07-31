@@ -1,6 +1,6 @@
 /** Named visual scenes, one per implementation step. `npm run snap <scene>`
  *  drives the real UI and writes PNGs to e2e/shots/ for review before commit. */
-import type { Browser } from "playwright";
+import type { Browser, Page } from "playwright";
 import { openPage, shoot, VIEWPORTS, type Theme } from "./shoot";
 import { createTask, stopTask, waitForEvents, waitForStatus } from "./tasks";
 
@@ -87,4 +87,61 @@ const home: Scene = async (browser) => {
   await page.context().close();
 };
 
-export const scenes: Record<string, Scene> = { shell, sessions, home };
+/** The newest task is first in the rail, so scenes can open what they made. */
+async function selectNewest(page: Page) {
+  await page.locator('nav[aria-label="Sessions"] li button').first().click();
+}
+
+/** A live run, then the same session after it finishes. */
+const chat: Scene = async (browser) => {
+  const task = await createTask(
+    "Research the Voyager program and write a briefing with sources.",
+  );
+
+  const page = await openPage(browser, { theme: "light" });
+  await selectNewest(page);
+  await page.getByText("Executing command").first().waitFor({ timeout: 30_000 });
+  await shoot(page, "chat-live");
+
+  await waitForStatus(task.id, "complete");
+  await page.waitForTimeout(400);
+  await shoot(page, "chat-complete");
+
+  await page.context().close();
+
+  const dark = await openPage(browser, { theme: "dark" });
+  await selectNewest(dark);
+  await dark.getByText("Tool error").first().waitFor();
+  await shoot(dark, "chat-complete-dark");
+  await dark.context().close();
+
+  // A stream taller than the viewport: scrolling up must stop the auto-follow
+  // and offer the jump-to-latest pill.
+  const long = await createTask("Crawl the archive index and summarise it.", "long");
+  await waitForEvents(long.id, 40);
+  const tall = await openPage(browser, { theme: "light" });
+  await selectNewest(tall);
+  await tall.waitForFunction(() => {
+    const el = document.querySelector("main .overflow-y-auto");
+    return !!el && el.scrollHeight > el.clientHeight + 200;
+  }, { timeout: 30_000 });
+  await tall.locator("main .overflow-y-auto").first().evaluate((el) => el.scrollTo({ top: 0 }));
+  await tall.waitForTimeout(500);
+  await shoot(tall, "chat-jump-pill");
+  await stopTask(long.id);
+  await tall.context().close();
+
+  // A deliberately tiny context budget forces the ledger to spill observations
+  // to disk, which the stream reports as a dim compress line.
+  const squeezed = await createTask("Crawl with almost no context budget.", "long", {
+    budget_tokens: 200,
+  });
+  const cramped = await openPage(browser, { theme: "light" });
+  await selectNewest(cramped);
+  await cramped.getByText(/Compressed \d+ observation/).first().waitFor({ timeout: 30_000 });
+  await shoot(cramped, "chat-compress");
+  await stopTask(squeezed.id);
+  await cramped.context().close();
+};
+
+export const scenes: Record<string, Scene> = { shell, sessions, home, chat };
