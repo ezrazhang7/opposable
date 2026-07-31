@@ -1,31 +1,41 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { Sidebar } from "./components/Sidebar";
+import { ComputerPanel } from "./components/ComputerPanel";
+import { IconButton } from "./components/IconButton";
+import { PanelRight } from "./components/Icons";
+import { useTheme } from "./lib/theme";
 
-type Health = { ok: boolean; count: number } | { error: string } | null;
-
-/** Scaffold placeholder: proves the bundle mounts and the API is reachable
- *  through both the dev proxy and the Python server's static handler. */
 export default function App() {
-  const [health, setHealth] = useState<Health>(null);
-
-  useEffect(() => {
-    fetch("/api/tasks")
-      .then((r) => r.json())
-      .then((tasks) => setHealth({ ok: true, count: tasks.length }))
-      .catch((e) => setHealth({ error: String(e) }));
-  }, []);
+  const [theme, toggleTheme] = useTheme();
+  const [railCollapsed, setRailCollapsed] = useState(false);
+  const [panelOpen, setPanelOpen] = useState(true);
 
   return (
-    <div className="grid h-full place-items-center bg-stone-50 text-stone-900 dark:bg-stone-950 dark:text-stone-100">
-      <div className="text-center">
-        <h1 className="text-2xl font-semibold tracking-tight">opposable</h1>
-        <p className="mt-2 font-mono text-sm text-stone-500" data-testid="health">
-          {health === null
-            ? "checking api…"
-            : "ok" in health
-              ? `api ok — ${health.count} session(s)`
-              : `api unreachable: ${health.error}`}
-        </p>
-      </div>
+    <div className="flex h-full overflow-hidden bg-bg text-fg">
+      <Sidebar
+        collapsed={railCollapsed}
+        onToggleCollapse={() => setRailCollapsed((v) => !v)}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+      />
+
+      <main className="flex min-w-0 flex-1">
+        <section className="flex min-w-[420px] flex-1 flex-col">
+          <header className="flex h-14 items-center gap-3 border-b border-line px-4">
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-[13px] font-medium text-muted">No task selected</p>
+            </div>
+            {!panelOpen && (
+              <IconButton label="Show computer panel" onClick={() => setPanelOpen(true)}>
+                <PanelRight />
+              </IconButton>
+            )}
+          </header>
+          <div className="min-h-0 flex-1 overflow-y-auto" />
+        </section>
+
+        {panelOpen && <ComputerPanel onClose={() => setPanelOpen(false)} />}
+      </main>
     </div>
   );
 }

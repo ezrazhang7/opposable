@@ -7,9 +7,76 @@
 /* Dark mode is a class on <html>, set by the inline script in index.html. */
 @custom-variant dark (&:where(.dark, .dark *));
 
-@theme {
+/* Semantic tokens. Every component styles against these names, never against
+   raw stone/violet scales, so the two themes stay in lockstep. */
+:root {
+  --bg: #fafaf9;
+  --panel: #ffffff;
+  --raised: #f5f5f4;
+  --line: #e7e5e4;
+  --line-strong: #d6d3d1;
+  --fg: #1c1917;
+  --muted: #78716c;
+  --faint: #a8a29e;
+  --accent: #6d5df6;
+  --accent-hover: #5b4bf0;
+  --accent-fg: #ffffff;
+  --accent-soft: #eeebff;
+  --ok: #15803d;
+  --warn: #b45309;
+  --err: #b91c1c;
+  --ok-soft: #dcfce7;
+  --warn-soft: #fef3c7;
+  --err-soft: #fee2e2;
+  --shadow-overlay: 0 12px 32px -8px rgb(28 25 23 / 0.18);
+}
+
+.dark {
+  --bg: #111110;
+  --panel: #191917;
+  --raised: #201f1d;
+  --line: #2a2a28;
+  --line-strong: #3a3a36;
+  --fg: #e7e5e4;
+  --muted: #a8a29e;
+  --faint: #78716c;
+  --accent: #8b7dff;
+  --accent-hover: #9c90ff;
+  --accent-fg: #14121f;
+  --accent-soft: #241f45;
+  --ok: #4ade80;
+  --warn: #fbbf24;
+  --err: #f87171;
+  --ok-soft: #14301f;
+  --warn-soft: #33260c;
+  --err-soft: #351717;
+  --shadow-overlay: 0 12px 32px -8px rgb(0 0 0 / 0.55);
+}
+
+@theme inline {
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-raised: var(--raised);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-err: var(--err);
+  --color-ok-soft: var(--ok-soft);
+  --color-warn-soft: var(--warn-soft);
+  --color-err-soft: var(--err-soft);
+
+  --shadow-overlay: var(--shadow-overlay);
 }
 
 html,
@@ -22,5 +89,43 @@ body {
   font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.6;
+  background: var(--bg);
+  color: var(--fg);
   -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbars: present but quiet, in both themes. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-clip: content-box;
+}
+
+/* The working-state pulse used by the active action chip and status dots. */
+@keyframes opposable-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.pulse {
+  animation: opposable-pulse 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse {
+    animation: none;
+  }
 }

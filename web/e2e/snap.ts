@@ -1,18 +1,17 @@
-/** Screenshot sweep of the running UI: `npm run snap [name-prefix]`.
+/** Screenshot runner: `npm run snap <scene>`.
  *
- * Assumes a server is already up at OPPOSABLE_BASE (default :8734).
+ * Assumes a server is already serving the UI at OPPOSABLE_BASE (default :8734).
  */
-import { openPage, shoot, withBrowser, VIEWPORTS, type Theme } from "./shoot";
+import { withBrowser } from "./shoot";
+import { scenes } from "./scenes";
 
-const prefix = process.argv[2] ?? "app";
+const name = process.argv[2];
+const scene = name ? scenes[name] : undefined;
 
-await withBrowser(async (browser) => {
-  for (const theme of ["light", "dark"] as Theme[]) {
-    const page = await openPage(browser, { theme });
-    await shoot(page, `${prefix}-${theme}`);
-    await page.context().close();
-  }
-  const laptop = await openPage(browser, { theme: "light", viewport: VIEWPORTS.laptop });
-  await shoot(laptop, `${prefix}-1024`);
-  await laptop.context().close();
-});
+if (!scene) {
+  console.error(`usage: npm run snap <scene>\nscenes: ${Object.keys(scenes).join(", ")}`);
+  process.exit(1);
+}
+
+console.log(`scene: ${name}`);
+await withBrowser(scene);
