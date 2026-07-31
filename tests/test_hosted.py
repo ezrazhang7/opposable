@@ -12,6 +12,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -22,7 +23,7 @@ from opposable.providers import ToolCall
 from opposable.sandbox import SANDBOX_ENV_ALLOWLIST, LocalSandbox, sandbox_env
 from opposable.server import _check_params
 
-from .test_server import SCRIPT, request, start_server, turn
+from .test_server import SCRIPT, request, sse_events, start_server, turn
 
 SECRETS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
 
@@ -520,6 +521,159 @@ def test_hosted_registration_requires_affirmative_acceptance(tmp_path, hosted):
     )
     assert status == 400 and "terms of service" in body["error"]
     httpd.shutdown()
+
+
+# --------------------------------------------- 0d: user content off our origin
+
+
+@pytest.fixture
+def separate_files_origin(monkeypatch):
+    monkeypatch.setenv("OPPOSABLE_FILES_ORIGIN", "http://files.opposableusercontent.test")
+    monkeypatch.setenv("OPPOSABLE_FILE_SIGNING_KEY", "k" * 48)
+
+
+def raw_request(port, path, headers=None):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    conn.request("GET", path, headers=headers or {})
+    resp = conn.getresponse()
+    body = resp.read()
+    out = (resp.status, dict(resp.getheaders()), body)
+    conn.close()
+    return out
+
+
+def _run_task_with_files(tmp_path, extra_files=()):
+    """Run the scripted task to completion so its workdir has real files."""
+    httpd, port = start_server(tmp_path, SCRIPT)
+    headers = sign_up(port, "files@example.com")
+    _, meta = request(port, "POST", "/api/tasks", {"task": "x" * 100}, headers)
+    sse_events(port, task_id := meta["id"], headers=headers)
+    for name, content in extra_files:
+        target = tmp_path / f".opposable-{task_id}" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    return httpd, port, headers, task_id
+
+
+def test_files_redirect_to_the_separate_origin(tmp_path, multi_user, separate_files_origin):
+    httpd, port, headers, task_id = _run_task_with_files(tmp_path)
+    status, resp_headers, _ = raw_request(
+        port, f"/api/tasks/{task_id}/files/report.md", headers
+    )
+    assert status == 302
+    location = resp_headers["Location"]
+    assert location.startswith("http://files.opposableusercontent.test/files/")
+    assert "sig=" in location and "exp=" in location
+    httpd.shutdown()
+
+
+def test_the_files_host_serves_only_signed_content(tmp_path, multi_user, separate_files_origin):
+    httpd, port, headers, task_id = _run_task_with_files(tmp_path)
+    _, resp_headers, _ = raw_request(port, f"/api/tasks/{task_id}/files/report.md", headers)
+    signed = urlsplit(resp_headers["Location"])
+    files_host = {"Host": "files.opposableusercontent.test"}
+
+    status, _, body = raw_request(port, f"{signed.path}?{signed.query}", files_host)
+    assert status == 200 and b"# findings" in body
+
+    # tampering with any signed component invalidates it
+    for broken in (
+        f"{signed.path}?{signed.query.replace('sig=', 'sig=0')}",
+        f"{signed.path}?exp=0&sig={parse_qs(signed.query)['sig'][0]}",
+        signed.path,
+    ):
+        assert raw_request(port, broken, files_host)[0] == 403
+
+    # a signature is not transferable to another file
+    other = signed.path.replace("report.md", "todo.md")
+    assert raw_request(port, f"{other}?{signed.query}", files_host)[0] == 403
+
+    # and the files host is not the app
+    assert raw_request(port, "/api/tasks", files_host)[0] == 404
+    assert raw_request(port, "/", files_host)[0] == 404
+    httpd.shutdown()
+
+
+def test_agent_written_html_is_never_inline(tmp_path, multi_user, separate_files_origin):
+    """A prompt-injected agent writing report.html is how stored XSS arrives."""
+    httpd, port, headers, task_id = _run_task_with_files(
+        tmp_path,
+        [("report.html", "<script>alert(1)</script>"), ("logo.svg", "<svg onload=alert(1)>")],
+    )
+    files_host = {"Host": "files.opposableusercontent.test"}
+    for name in ("report.html", "logo.svg"):
+        _, resp_headers, _ = raw_request(port, f"/api/tasks/{task_id}/files/{name}", headers)
+        signed = urlsplit(resp_headers["Location"])
+        status, served, _ = raw_request(port, f"{signed.path}?{signed.query}", files_host)
+        assert status == 200
+        assert served["Content-Type"] == "application/octet-stream"
+        assert served["Content-Disposition"].startswith("attachment")
+        assert served["X-Content-Type-Options"] == "nosniff"
+        assert served["Content-Security-Policy"] == "default-src 'none'; sandbox"
+        assert served["Referrer-Policy"] == "no-referrer"
+    httpd.shutdown()
+
+
+def test_previewable_files_stay_inline_but_declared_as_text(
+    tmp_path, multi_user, separate_files_origin
+):
+    httpd, port, headers, task_id = _run_task_with_files(tmp_path)
+    _, resp_headers, _ = raw_request(port, f"/api/tasks/{task_id}/files/report.md", headers)
+    signed = urlsplit(resp_headers["Location"])
+    _, served, _ = raw_request(
+        port, f"{signed.path}?{signed.query}", {"Host": "files.opposableusercontent.test"}
+    )
+    assert served["Content-Type"] == "text/plain; charset=utf-8"
+    assert served["Content-Disposition"].startswith("inline")
+    httpd.shutdown()
+
+
+def test_internal_files_are_filtered_server_side(tmp_path, multi_user):
+    """.opposable/ holds the system prompt and every tool trace. It was sent
+    to the client with a flag and hidden in the UI."""
+    httpd, port, headers, task_id = _run_task_with_files(tmp_path)
+    _, listing = request(port, "GET", f"/api/tasks/{task_id}/files", None, headers)
+    paths = [f["path"] for f in listing["files"]]
+    assert paths, "the listing should not be empty"
+    assert not [p for p in paths if p.startswith(".opposable/")]
+    # ...and asking for one directly does not work either
+    status, _ = request(
+        port, "GET", f"/api/tasks/{task_id}/files/.opposable/state/state.json", None, headers
+    )
+    assert status == 404
+    httpd.shutdown()
+
+
+def test_single_user_installs_can_still_inspect_their_own_traces(tmp_path):
+    """The operator of a laptop install looking at their own agent's ledger is
+    a feature, not a leak."""
+    httpd, port = start_server(tmp_path, SCRIPT)
+    _, meta = request(port, "POST", "/api/tasks", {"task": "x" * 100})
+    sse_events(port, meta["id"])
+    _, listing = request(port, "GET", f"/api/tasks/{meta['id']}/files")
+    assert [f for f in listing["files"] if f["internal"]]
+    httpd.shutdown()
+
+
+def test_the_spa_has_a_content_security_policy(tmp_path):
+    httpd, port = start_server(tmp_path, SCRIPT)
+    _, headers, _ = raw_request(port, "/")
+    csp = headers["Content-Security-Policy"]
+    assert "default-src 'self'" in csp
+    assert "frame-ancestors 'none'" in csp
+    assert "object-src 'none'" in csp
+    assert "'unsafe-eval'" not in csp
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    httpd.shutdown()
+
+
+def test_hosted_preflight_wants_a_separate_registrable_domain(hosted, monkeypatch):
+    monkeypatch.setenv("OPPOSABLE_APP_ORIGIN", "https://opposable.example")
+    monkeypatch.setenv("OPPOSABLE_FILE_SIGNING_KEY", "k" * 48)
+    monkeypatch.setenv("OPPOSABLE_FILES_ORIGIN", "https://files.opposable.example")
+    assert any("shares a registrable domain" in p for p in config.preflight())
+    monkeypatch.setenv("OPPOSABLE_FILES_ORIGIN", "https://opposableusercontent.example")
+    assert not any("registrable domain" in p for p in config.preflight())
 
 
 # ------------------------------------------------------------------ 0b: egress

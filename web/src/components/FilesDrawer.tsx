@@ -47,6 +47,10 @@ export function FilesDrawer({ taskId, deliverables, initialPath, onClose }: Prop
     [files, showInternal],
   );
 
+  // Multi-tenant servers filter .opposable/ out of the listing entirely, so
+  // there is nothing for the toggle to reveal and it should not be offered.
+  const hasInternal = useMemo(() => (files ?? []).some((f) => f.internal), [files]);
+
   const pinned = useMemo(
     () => (files ?? []).filter((f) => deliverables.includes(f.path)),
     [files, deliverables],
@@ -76,15 +80,17 @@ export function FilesDrawer({ taskId, deliverables, initialPath, onClose }: Prop
         <header className="flex h-14 shrink-0 items-center gap-3 border-b border-line px-4">
           <Folder size={17} className="text-muted" />
           <h2 className="flex-1 text-[13.5px] font-semibold">All files in this task</h2>
-          <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-muted">
-            <input
-              type="checkbox"
-              checked={showInternal}
-              onChange={(e) => setShowInternal(e.target.checked)}
-              className="accent-accent"
-            />
-            Show internal files
-          </label>
+          {hasInternal && (
+            <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-muted">
+              <input
+                type="checkbox"
+                checked={showInternal}
+                onChange={(e) => setShowInternal(e.target.checked)}
+                className="accent-accent"
+              />
+              Show internal files
+            </label>
+          )}
           <IconButton label="Close files" onClick={onClose}>
             <X />
           </IconButton>

@@ -82,6 +82,29 @@ def terms_version() -> str:
     return os.environ.get("OPPOSABLE_TERMS_VERSION", "").strip()
 
 
+def files_origin() -> str:
+    """Where task files are served from.
+
+    Must be a **separate registrable domain**, not a subdomain — this is why
+    ``googleusercontent.com`` exists. An agent that writes ``report.html`` is
+    writing a page; serving it on the app origin makes that stored XSS against
+    every viewer, and a subdomain still shares cookies and enough of the
+    origin's trust to matter.
+    """
+    return os.environ.get("OPPOSABLE_FILES_ORIGIN", "").strip().rstrip("/")
+
+
+def file_signing_key() -> bytes:
+    """Key for short-TTL file URLs. The files origin has no session cookie —
+    it is a different site on purpose — so a signature is what authorizes it."""
+    return os.environ.get("OPPOSABLE_FILE_SIGNING_KEY", "").strip().encode("utf-8")
+
+
+#: How long a signed file URL lives. Long enough to click, short enough that a
+#: leaked Referer is stale before anyone acts on it.
+FILE_URL_TTL_SECONDS = 300
+
+
 def sandbox_backend() -> str:
     """The backend hosted mode will actually run. Empty until a microVM
     vendor is chosen and ``OPPOSABLE_SANDBOX_BACKEND`` names it."""
@@ -104,6 +127,14 @@ def check_sandbox(kind: str) -> None:
             f"the {kind} sandbox is development-only; hosted mode requires a "
             f"microVM backend (set OPPOSABLE_SANDBOX_BACKEND)"
         )
+
+
+def _registrable(origin: str) -> str:
+    """Last two labels of a host. A deliberate approximation of the public
+    suffix list — good enough to catch "I put files on a subdomain", which is
+    the mistake this check exists for, and it errs toward complaining."""
+    host = origin.split("//")[-1].split("/")[0].split(":")[0].lower()
+    return ".".join(host.rsplit(".", 2)[-2:])
 
 
 def preflight() -> list[str]:
@@ -132,6 +163,12 @@ def preflight() -> list[str]:
         )
     if not app_origin():
         problems.append("0c: OPPOSABLE_APP_ORIGIN is unset — the CSRF fallback cannot work")
+    if not files_origin():
+        problems.append("0d: OPPOSABLE_FILES_ORIGIN is unset — user content would be served on our origin")
+    elif app_origin() and _registrable(files_origin()) == _registrable(app_origin()):
+        problems.append("0d: OPPOSABLE_FILES_ORIGIN shares a registrable domain with the app")
+    if len(file_signing_key()) < 32:
+        problems.append("0d: OPPOSABLE_FILE_SIGNING_KEY is missing or shorter than 32 bytes")
     if not terms_version():
         problems.append("0g: OPPOSABLE_TERMS_VERSION is unset — acceptance cannot be recorded")
     if not os.environ.get("OPPOSABLE_TURNSTILE_SECRET", "").strip():

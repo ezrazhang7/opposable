@@ -55,11 +55,11 @@ def request(port, method, path, body=None, headers=None):
     return resp.status, data
 
 
-def sse_events(port, task_id, until_kinds=("done",), timeout=30):
+def sse_events(port, task_id, until_kinds=("done",), timeout=30, headers=None):
     """Read the SSE stream, returning (kind, payload) pairs until a terminal
     kind or eof arrives."""
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
-    conn.request("GET", f"/api/tasks/{task_id}/events")
+    conn.request("GET", f"/api/tasks/{task_id}/events", headers=headers or {})
     resp = conn.getresponse()
     events, kind, deadline = [], None, time.time() + timeout
     while time.time() < deadline:

@@ -21,6 +21,8 @@ server restart and powers replay.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import mimetypes
 import os
@@ -32,7 +34,7 @@ import uuid
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 from . import auth, config
 from .auth import Identity
@@ -57,6 +59,67 @@ npm --prefix web run build</pre>
 """
 
 RESUME_TASK = "Continue the task. Re-read todo.md and finish remaining steps."
+
+
+#: Extensions we will render in a browser tab, mapped to the type we will
+#: claim they are. Everything else downloads. Note what is absent: .html and
+#: .svg are never inline, because both execute script.
+PREVIEWABLE_TYPES = {
+    ".txt": "text/plain; charset=utf-8",
+    ".md": "text/plain; charset=utf-8",
+    ".log": "text/plain; charset=utf-8",
+    ".csv": "text/plain; charset=utf-8",
+    ".json": "text/plain; charset=utf-8",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+
+#: Sent with the SPA. 'unsafe-inline' for styles only: the build inlines a
+#: few dynamic style attributes. Scripts get no such exemption.
+SPA_CSP = (
+    "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; "
+    "img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'; "
+    "connect-src 'self'; form-action 'self'"
+)
+
+
+def _is_internal(rel: str) -> bool:
+    return rel.startswith(".opposable/") or rel == ".opposable"
+
+
+def _hide_internals() -> bool:
+    """Single-operator installs may inspect their own agent's traces; a
+    multi-tenant one may not, and that is not a UI decision."""
+    return config.auth_enabled()
+
+
+def _signed_file_url(origin: str, task_id: str, rel: str) -> str:
+    expires = str(int(time.time()) + config.FILE_URL_TTL_SECONDS)
+    encoded = "/".join(quote(part, safe="") for part in rel.split("/"))
+    signature = _file_signature(task_id, rel, expires)
+    return f"{origin}/files/{task_id}/{encoded}?exp={expires}&sig={signature}"
+
+
+def _file_signature(task_id: str, rel: str, expires: str) -> str:
+    # The path is inside the signed message, so a valid signature for one file
+    # is not a valid signature for another.
+    message = f"{task_id}\n{rel}\n{expires}".encode("utf-8")
+    return hmac.new(config.file_signing_key(), message, hashlib.sha256).hexdigest()
+
+
+def _verify_file_signature(task_id: str, rel: str, expires: str, signature: str) -> bool:
+    key = config.file_signing_key()
+    if not key or not signature:
+        return False
+    try:
+        if int(expires) < time.time():
+            return False
+    except ValueError:
+        return False
+    return hmac.compare_digest(_file_signature(task_id, rel, expires), signature)
 
 
 def _check_params(params: dict) -> None:
@@ -392,6 +455,12 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         parts = [p for p in path.split("/") if p]
         try:
+            if self._on_files_host():
+                # The files host serves signed user content and nothing else:
+                # no SPA, no API, no session.
+                if parts[:1] == ["files"]:
+                    return self._serve_signed_file(parts)
+                return self._error(404, "not found")
             if parts[:2] == ["api", "auth"]:
                 return self._auth_get(parts[2:])
             if parts[:2] == ["api", "tasks"]:
@@ -647,29 +716,92 @@ class Handler(BaseHTTPRequestHandler):
             if not p.is_file():
                 continue
             rel = p.relative_to(root).as_posix()
+            internal = _is_internal(rel)
+            # Filtered here, not flagged for the client to hide. .opposable/
+            # holds the system prompt and every tool trace; the operator of a
+            # single-user install may look at their own, a tenant may not.
+            if internal and _hide_internals():
+                continue
             files.append(
                 {
                     "path": rel,
                     "size": p.stat().st_size,
                     "mtime": p.stat().st_mtime,
-                    "internal": rel.startswith(".opposable/"),
+                    "internal": internal,
                 }
             )
         self._json(200, {"files": files})
 
     def _send_file_content(self, handle: TaskHandle, rel: str) -> None:
+        if _is_internal(rel) and _hide_internals():
+            return self._error(404, f"no file {rel}")
+        origin = config.files_origin()
+        if origin and not self._on_files_host():
+            # Never serve user content from the app origin. The redirect is
+            # short-lived and signed because the files host is a different
+            # site and therefore has no session cookie.
+            return self._redirect(_signed_file_url(origin, handle.id, rel))
         target = self._workdir_path(handle, rel)
         if not target or not target.is_file():
             return self._error(404, f"no file {rel}")
+        self._send_user_content(target)
+
+    def _send_user_content(self, target: Path) -> None:
+        """Serve a file the agent produced, on the assumption that it is
+        hostile — because a prompt-injected agent writing report.html is
+        exactly how stored XSS arrives."""
         data = target.read_bytes()
-        mime = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-        if mime.startswith("text/"):
-            mime += "; charset=utf-8"
+        suffix = target.suffix.lower()
+        inline = suffix in PREVIEWABLE_TYPES
+        mime = PREVIEWABLE_TYPES.get(suffix, "application/octet-stream")
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header(
+            "Content-Disposition",
+            f'{"inline" if inline else "attachment"}; filename="{target.name}"',
+        )
+        self.send_header("Content-Security-Policy", "default-src 'none'; sandbox")
+        # A leaked Referer is the most common real-world share-link failure.
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Robots-Tag", "noindex, nofollow")
         self.end_headers()
         self.wfile.write(data)
+
+    def _redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
+
+    def _on_files_host(self) -> bool:
+        origin = config.files_origin()
+        if not origin:
+            return False
+        host = (self.headers.get("Host") or "").lower()
+        return bool(host) and host == origin.split("//")[-1].lower()
+
+    def _serve_signed_file(self, parts: list[str]) -> None:
+        """The files-host route. No cookie, no session — the signature is the
+        entire authorization, which is why it is short-lived and covers the
+        task id and path together."""
+        if len(parts) < 3:
+            return self._error(404, "not found")
+        task_id, rel = parts[1], "/".join(parts[2:])
+        query = parse_qs(urlsplit(self.path).query)
+        expires = (query.get("exp") or ["0"])[0]
+        signature = (query.get("sig") or [""])[0]
+        if not _verify_file_signature(task_id, rel, expires, signature):
+            return self._error(403, "link is invalid or has expired")
+        handle = self.manager.get(task_id)
+        if not handle or (_is_internal(rel) and _hide_internals()):
+            return self._error(404, "not found")
+        target = self._workdir_path(handle, rel)
+        if not target or not target.is_file():
+            return self._error(404, "not found")
+        self._send_user_content(target)
 
     # ----------------------------------------------------------------- static
 
@@ -679,6 +811,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
+            self._send_app_security_headers()
             self.end_headers()
             self.wfile.write(data)
             return
@@ -691,10 +824,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
+        self._send_app_security_headers()
         if rel.startswith("assets/"):
             self.send_header("Cache-Control", "public, max-age=31536000, immutable")
         self.end_headers()
         self.wfile.write(data)
+
+    def _send_app_security_headers(self) -> None:
+        self.send_header("Content-Security-Policy", SPA_CSP)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("X-Frame-Options", "DENY")
 
 
 class OpposableServer(ThreadingHTTPServer):
